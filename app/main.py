@@ -2,8 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
+import os
 import sqlite3
 import json
+from openai import OpenAI
 
 from app.database.connection import engine, Base
 
@@ -128,6 +130,8 @@ init_ccpc_db()
 
 @app.post("/ccpc/card")
 def create_ccpc_card(card: CCPCCardCreate):
+    created_at = datetime.now().isoformat()
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -142,7 +146,7 @@ def create_ccpc_card(card: CCPCCardCreate):
             card.panel_name or "Panel",
             card.task_text,
             "active",
-            datetime.now().isoformat(),
+            created_at,
         ),
     )
 
@@ -150,9 +154,29 @@ def create_ccpc_card(card: CCPCCardCreate):
     card_id = cursor.lastrowid
     conn.close()
 
+    s3_key = None
+
+    try:
+        from app.core.s3 import backup_dacum_card
+
+        s3_key = backup_dacum_card(
+            session_id=card.session_id,
+            payload={
+                "id": card_id,
+                "session_id": card.session_id,
+                "panel_name": card.panel_name or "Panel",
+                "task_text": card.task_text,
+                "status": "active",
+                "created_at": created_at,
+            },
+        )
+    except Exception as e:
+        print("S3 backup failed:", str(e))
+
     return {
         "success": True,
         "id": card_id,
+        "s3_key": s3_key,
         "message": "Kad DACUM berjaya disimpan",
     }
 
@@ -206,94 +230,174 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
             "clusters": [],
         }
 
-    clusters = [
-        {
-            "clusterName": "Penyediaan Bahan dan Komponen Kerja",
-            "suggestedCategory": "Core Candidate",
-            "items": [],
-            "notes": "Melibatkan penyediaan bahan, komponen, dan keperluan awal kerja.",
-        },
-        {
-            "clusterName": "Pelaksanaan Kerja Pemasangan",
-            "suggestedCategory": "Core Candidate",
-            "items": [],
-            "notes": "Melibatkan aktiviti pemasangan, penyusunan, dan kerja teknikal utama.",
-        },
-        {
-            "clusterName": "Pemeriksaan dan Pengesahan Kualiti",
-            "suggestedCategory": "Core Candidate",
-            "items": [],
-            "notes": "Melibatkan semakan, pemeriksaan, pengujian, dan pengesahan hasil kerja.",
-        },
-        {
-            "clusterName": "Kerja Kemasan dan Pelarasan",
-            "suggestedCategory": "Elective Candidate",
-            "items": [],
-            "notes": "Melibatkan pelarasan, kemasan, dan penambahbaikan akhir.",
-        },
-        {
-            "clusterName": "Item Perlu Semakan",
-            "suggestedCategory": "Review Required",
-            "items": [],
-            "notes": "Item yang belum cukup jelas untuk dipadankan.",
-        },
-    ]
+    openai_api_key = os.getenv("OPENAI_API_KEY")
 
-    for item in items:
-        text = item.lower()
+    if not openai_api_key:
+        conn.close()
+        return {
+            "success": False,
+            "message": "OPENAI_API_KEY belum ditetapkan di server",
+            "clusters": [],
+        }
 
-        if any(k in text for k in ["prepare", "material", "component", "bahan", "komponen"]):
-            clusters[0]["items"].append(item)
+    client = OpenAI(api_key=openai_api_key)
 
-        elif any(k in text for k in ["install", "pasang", "memasang", "arrange", "position", "menarik", "cable", "socket"]):
-            clusters[1]["items"].append(item)
+    prompt = f"""
+You are an expert in Occupational Analysis, DACUM, NOSS, TVET competency standards, and CIDB Construction Occupational Competency Standards (COCS).
 
-        elif any(k in text for k in ["check", "test", "verify", "confirm", "semak", "uji", "sahkan"]):
-            clusters[2]["items"].append(item)
+Task:
+Group the following DACUM task cards into logical competency clusters.
 
-        elif any(k in text for k in ["adjust", "level", "compact", "spread", "align", "kemas", "laras"]):
-            clusters[3]["items"].append(item)
+Rules:
+1. Group only tasks that are genuinely related.
+2. Do not force unrelated items into a cluster.
+3. Suggest a professional cluster name suitable for CCPC / competency analysis.
+4. Suggested category must be one of:
+   - Core Candidate
+   - Elective Candidate
+   - Review Required
+5. Keep the original task text exactly as provided.
+6. Output must be valid JSON only.
+7. Do not include markdown.
+8. Do not include explanation outside JSON.
 
-        else:
-            clusters[4]["items"].append(item)
+Return format:
+{{
+  "clusters": [
+    {{
+      "clusterName": "Professional cluster name",
+      "suggestedCategory": "Core Candidate",
+      "items": ["task 1", "task 2"],
+      "notes": "Short rationale for this cluster"
+    }}
+  ]
+}}
 
-    clusters = [cluster for cluster in clusters if len(cluster["items"]) > 0]
+DACUM task cards:
+{json.dumps(items, ensure_ascii=False, indent=2)}
+"""
 
-    cursor.execute(
-        """
-        DELETE FROM ccpc_clusters
-        WHERE session_id = ?
-        """,
-        (request.session_id,),
-    )
-
-    for cluster in clusters:
-        cursor.execute(
-            """
-            INSERT INTO ccpc_clusters
-            (session_id, cluster_name, suggested_category, items_json, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                request.session_id,
-                cluster["clusterName"],
-                cluster["suggestedCategory"],
-                json.dumps(cluster["items"]),
-                cluster["notes"],
-                datetime.now().isoformat(),
-            ),
+    try:
+        completion = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a precise occupational analysis and competency standard development expert. Always return valid JSON only.",
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
         )
 
-    conn.commit()
-    conn.close()
+        ai_content = completion.choices[0].message.content
+        ai_result = json.loads(ai_content)
 
-    return {
-        "success": True,
-        "session_id": request.session_id,
-        "total_items": len(items),
-        "total_clusters": len(clusters),
-        "clusters": clusters,
-    }
+        clusters = ai_result.get("clusters", [])
+
+        cleaned_clusters = []
+
+        for cluster in clusters:
+            cluster_name = cluster.get("clusterName", "").strip()
+            suggested_category = cluster.get("suggestedCategory", "Review Required").strip()
+            cluster_items = cluster.get("items", [])
+            notes = cluster.get("notes", "").strip()
+
+            if suggested_category not in [
+                "Core Candidate",
+                "Elective Candidate",
+                "Review Required",
+            ]:
+                suggested_category = "Review Required"
+
+            valid_items = [
+                item for item in cluster_items
+                if isinstance(item, str) and item.strip()
+            ]
+
+            if cluster_name and valid_items:
+                cleaned_clusters.append({
+                    "clusterName": cluster_name,
+                    "suggestedCategory": suggested_category,
+                    "items": valid_items,
+                    "notes": notes or "Cluster dijana berdasarkan persamaan aktiviti kerja DACUM.",
+                })
+
+        if not cleaned_clusters:
+            conn.close()
+            return {
+                "success": False,
+                "message": "AI tidak menghasilkan cluster yang sah",
+                "clusters": [],
+            }
+
+        cursor.execute(
+            """
+            DELETE FROM ccpc_clusters
+            WHERE session_id = ?
+            """,
+            (request.session_id,),
+        )
+
+        for cluster in cleaned_clusters:
+            cursor.execute(
+                """
+                INSERT INTO ccpc_clusters
+                (session_id, cluster_name, suggested_category, items_json, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request.session_id,
+                    cluster["clusterName"],
+                    cluster["suggestedCategory"],
+                    json.dumps(cluster["items"], ensure_ascii=False),
+                    cluster["notes"],
+                    datetime.now().isoformat(),
+                ),
+            )
+
+        conn.commit()
+        conn.close()
+
+        try:
+            from app.core.s3 import upload_json_to_s3
+
+            upload_json_to_s3(
+                folder=f"ai-clusters/{request.session_id}",
+                filename=f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json",
+                data={
+                    "session_id": request.session_id,
+                    "total_items": len(items),
+                    "total_clusters": len(cleaned_clusters),
+                    "clusters": cleaned_clusters,
+                    "created_at": datetime.utcnow().isoformat(),
+                },
+            )
+        except Exception as e:
+            print("S3 AI cluster backup failed:", str(e))
+
+        return {
+            "success": True,
+            "session_id": request.session_id,
+            "total_items": len(items),
+            "total_clusters": len(cleaned_clusters),
+            "clusters": cleaned_clusters,
+        }
+
+    except Exception as e:
+        conn.close()
+        print("AI clustering error:", str(e))
+
+        return {
+            "success": False,
+            "message": "AI clustering gagal dijalankan",
+            "error": str(e),
+            "clusters": [],
+        }
 
 @app.get("/ccpc/clusters/{session_id}")
 def get_ccpc_clusters(session_id: str):
