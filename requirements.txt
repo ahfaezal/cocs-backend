@@ -6,3 +6,6 @@ python-multipart
 openai
 boto3
 psycopg2-binary
+passlib[bcrypt]
+python-jose[cryptography]
+email-validator

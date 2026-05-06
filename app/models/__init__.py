@@ -14,3 +14,6 @@ from . import competency_weightage
 from . import competency_unit_weightage
 from . import review_log
 from . import approval
+from app.models.user import User
+from app.models.user import User
+from app.models.project_assignment import ProjectAssignment
