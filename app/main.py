@@ -704,9 +704,6 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
             if not item_text or item_key in seen:
                 continue
 
-            if not is_valid_title(item_text):
-                continue
-
             seen.add(item_key)
             valid_items.append(item_text)
 
@@ -907,8 +904,10 @@ DACUM task cards:
 
             valid_items = normalize_items(cluster.get("items", []))
 
-            if len(valid_items) < 4 or len(valid_items) > 6:
+            if len(valid_items) < 3:
                 continue
+
+            valid_items = valid_items[:6]
 
             used_cluster_names.add(cluster_key)
 
