@@ -7,6 +7,7 @@ import os
 import sqlite3
 import json
 from openai import OpenAI
+from sqlalchemy import text
 
 from app.database.connection import engine, Base
 
@@ -123,9 +124,6 @@ app.include_router(reporting_route.router)
 # CCPC DIGITAL DACUM CARD
 # =========================
 
-DB_PATH = "cocs.db"
-
-
 class CCPCCardCreate(BaseModel):
     session_id: str
     panel_name: str
@@ -137,25 +135,43 @@ class CCPCClusterRequest(BaseModel):
 
 
 def init_ccpc_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ccpc_clusters (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            cluster_name TEXT NOT NULL,
-            suggested_category TEXT NOT NULL,
-            items_json TEXT NOT NULL,
-            notes TEXT,
-            created_at TEXT NOT NULL
-        )
-        """
+    id_column = (
+        "SERIAL PRIMARY KEY"
+        if engine.dialect.name == "postgresql"
+        else "INTEGER PRIMARY KEY AUTOINCREMENT"
     )
 
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS ccpc_cards (
+                    id {id_column},
+                    session_id TEXT NOT NULL,
+                    panel_name TEXT NOT NULL,
+                    task_text TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS ccpc_clusters (
+                    id {id_column},
+                    session_id TEXT NOT NULL,
+                    cluster_name TEXT NOT NULL,
+                    suggested_category TEXT NOT NULL,
+                    items_json TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
 
 
 init_ccpc_db()
@@ -170,43 +186,37 @@ class CCPProfilePayload(BaseModel):
 
 
 def init_cos_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cos_structures (
-            project_id TEXT PRIMARY KEY,
-            matrix_json TEXT NOT NULL,
-            target_json TEXT,
-            updated_at TEXT NOT NULL
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS cos_structures (
+                    project_id TEXT PRIMARY KEY,
+                    matrix_json TEXT NOT NULL,
+                    target_json TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
         )
-        """
-    )
-
-    conn.commit()
-    conn.close()
 
 
 init_cos_db()
 
 
 def init_ccp_profile_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ccp_profiles (
-            project_id TEXT PRIMARY KEY,
-            profiles_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ccp_profiles (
+                    project_id TEXT PRIMARY KEY,
+                    profiles_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
         )
-        """
-    )
-
-    conn.commit()
-    conn.close()
 
 
 init_ccp_profile_db()
@@ -214,21 +224,17 @@ init_ccp_profile_db()
 
 @app.get("/cos/structure/{project_id}")
 def get_cos_structure(project_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT project_id, matrix_json, target_json, updated_at
-        FROM cos_structures
-        WHERE project_id = ?
-        """,
-        (project_id,),
-    )
-
-    row = cursor.fetchone()
-    conn.close()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT project_id, matrix_json, target_json, updated_at
+                FROM cos_structures
+                WHERE project_id = :project_id
+                """
+            ),
+            {"project_id": project_id},
+        ).mappings().first()
 
     if not row:
         return {
@@ -246,29 +252,44 @@ def get_cos_structure(project_id: str):
 
 @app.post("/cos/structure/{project_id}")
 def save_cos_structure(project_id: str, payload: COSStructurePayload):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     updated_at = datetime.now().isoformat()
+    matrix = payload.matrix or {}
+    target = payload.target
 
-    cursor.execute(
-        """
-        INSERT INTO cos_structures (project_id, matrix_json, target_json, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET
-            matrix_json = excluded.matrix_json,
-            target_json = excluded.target_json,
-            updated_at = excluded.updated_at
-        """,
-        (
-            project_id,
-            json.dumps(payload.matrix or {}, ensure_ascii=False),
-            json.dumps(payload.target, ensure_ascii=False) if payload.target else None,
-            updated_at,
-        ),
-    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO cos_structures (project_id, matrix_json, target_json, updated_at)
+                VALUES (:project_id, :matrix_json, :target_json, :updated_at)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    matrix_json = excluded.matrix_json,
+                    target_json = excluded.target_json,
+                    updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "project_id": project_id,
+                "matrix_json": json.dumps(matrix, ensure_ascii=False),
+                "target_json": json.dumps(target, ensure_ascii=False) if target else None,
+                "updated_at": updated_at,
+            },
+        )
 
-    conn.commit()
-    conn.close()
+    try:
+        from app.core.s3 import backup_cos_structure
+
+        backup_cos_structure(
+            project_id=project_id,
+            payload={
+                "project_id": project_id,
+                "matrix": matrix,
+                "target": target,
+                "updated_at": updated_at,
+            },
+        )
+    except Exception as e:
+        print("S3 COS backup failed:", str(e))
 
     return {
         "success": True,
@@ -279,21 +300,17 @@ def save_cos_structure(project_id: str, payload: COSStructurePayload):
 
 @app.get("/ccp/profile/{project_id}")
 def get_ccp_profile(project_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT project_id, profiles_json, updated_at
-        FROM ccp_profiles
-        WHERE project_id = ?
-        """,
-        (project_id,),
-    )
-
-    row = cursor.fetchone()
-    conn.close()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT project_id, profiles_json, updated_at
+                FROM ccp_profiles
+                WHERE project_id = :project_id
+                """
+            ),
+            {"project_id": project_id},
+        ).mappings().first()
 
     if not row:
         return {
@@ -311,27 +328,40 @@ def get_ccp_profile(project_id: str):
 
 @app.post("/ccp/profile/{project_id}")
 def save_ccp_profile(project_id: str, payload: CCPProfilePayload):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     updated_at = datetime.now().isoformat()
+    profiles = payload.profiles or {}
 
-    cursor.execute(
-        """
-        INSERT INTO ccp_profiles (project_id, profiles_json, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET
-            profiles_json = excluded.profiles_json,
-            updated_at = excluded.updated_at
-        """,
-        (
-            project_id,
-            json.dumps(payload.profiles or {}, ensure_ascii=False),
-            updated_at,
-        ),
-    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO ccp_profiles (project_id, profiles_json, updated_at)
+                VALUES (:project_id, :profiles_json, :updated_at)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    profiles_json = excluded.profiles_json,
+                    updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "project_id": project_id,
+                "profiles_json": json.dumps(profiles, ensure_ascii=False),
+                "updated_at": updated_at,
+            },
+        )
 
-    conn.commit()
-    conn.close()
+    try:
+        from app.core.s3 import backup_ccp_profile
+
+        backup_ccp_profile(
+            project_id=project_id,
+            payload={
+                "project_id": project_id,
+                "profiles": profiles,
+                "updated_at": updated_at,
+            },
+        )
+    except Exception as e:
+        print("S3 CCP profile backup failed:", str(e))
 
     return {
         "success": True,
@@ -343,27 +373,43 @@ def save_ccp_profile(project_id: str, payload: CCPProfilePayload):
 def create_ccpc_card(card: CCPCCardCreate):
     created_at = datetime.now().isoformat()
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO ccpc_cards 
-        (session_id, panel_name, task_text, status, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            card.session_id,
-            card.panel_name or "Panel",
-            card.task_text,
-            "active",
-            created_at,
-        ),
-    )
-
-    conn.commit()
-    card_id = cursor.lastrowid
-    conn.close()
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            card_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO ccpc_cards
+                    (session_id, panel_name, task_text, status, created_at)
+                    VALUES (:session_id, :panel_name, :task_text, :status, :created_at)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "session_id": card.session_id,
+                    "panel_name": card.panel_name or "Panel",
+                    "task_text": card.task_text,
+                    "status": "active",
+                    "created_at": created_at,
+                },
+            ).scalar_one()
+        else:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO ccpc_cards
+                    (session_id, panel_name, task_text, status, created_at)
+                    VALUES (:session_id, :panel_name, :task_text, :status, :created_at)
+                    """
+                ),
+                {
+                    "session_id": card.session_id,
+                    "panel_name": card.panel_name or "Panel",
+                    "task_text": card.task_text,
+                    "status": "active",
+                    "created_at": created_at,
+                },
+            )
+            card_id = conn.execute(text("SELECT last_insert_rowid()")).scalar_one()
 
     s3_key = None
 
@@ -394,22 +440,18 @@ def create_ccpc_card(card: CCPCCardCreate):
 
 @app.get("/ccpc/cards/{session_id}")
 def get_ccpc_cards(session_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT id, session_id, panel_name, task_text, status, created_at
-        FROM ccpc_cards
-        WHERE session_id = ?
-        ORDER BY id DESC
-        """,
-        (session_id,),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, session_id, panel_name, task_text, status, created_at
+                FROM ccpc_cards
+                WHERE session_id = :session_id
+                ORDER BY id DESC
+                """
+            ),
+            {"session_id": session_id},
+        ).mappings().all()
 
     return [dict(row) for row in rows]
 
@@ -528,59 +570,61 @@ def build_local_ccpc_clusters(items: list[str]) -> list[dict]:
     return clusters
 
 
-def save_ccpc_clusters(cursor, session_id: str, clusters: list[dict]) -> None:
-    cursor.execute(
-        """
-        DELETE FROM ccpc_clusters
-        WHERE session_id = ?
-        """,
-        (session_id,),
+def save_ccpc_clusters(conn, session_id: str, clusters: list[dict]) -> None:
+    conn.execute(
+        text(
+            """
+            DELETE FROM ccpc_clusters
+            WHERE session_id = :session_id
+            """
+        ),
+        {"session_id": session_id},
     )
 
     for cluster in clusters:
-        cursor.execute(
-            """
-            INSERT INTO ccpc_clusters
-            (session_id, cluster_name, suggested_category, items_json, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                cluster["clusterName"],
-                cluster["suggestedCategory"],
-                json.dumps(
+        conn.execute(
+            text(
+                """
+                INSERT INTO ccpc_clusters
+                (session_id, cluster_name, suggested_category, items_json, notes, created_at)
+                VALUES (:session_id, :cluster_name, :suggested_category, :items_json, :notes, :created_at)
+                """
+            ),
+            {
+                "session_id": session_id,
+                "cluster_name": cluster["clusterName"],
+                "suggested_category": cluster["suggestedCategory"],
+                "items_json": json.dumps(
                     {
                         "items": cluster["items"],
                         "workStepsMap": cluster.get("workStepsMap", {}),
                     },
                     ensure_ascii=False,
                 ),
-
-                cluster["notes"],
-                datetime.now().isoformat(),
-            ),
+                "notes": cluster["notes"],
+                "created_at": datetime.now().isoformat(),
+            },
         )
+
+
 @app.post("/ccpc/cluster")
 def run_ccpc_clustering(request: CCPCClusterRequest):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT task_text
+                FROM ccpc_cards
+                WHERE session_id = :session_id
+                ORDER BY id ASC
+                """
+            ),
+            {"session_id": request.session_id},
+        ).mappings().all()
 
-    cursor.execute(
-        """
-        SELECT task_text
-        FROM ccpc_cards
-        WHERE session_id = ?
-        ORDER BY id ASC
-        """,
-        (request.session_id,),
-    )
-
-    rows = cursor.fetchall()
     items = [row["task_text"] for row in rows if row["task_text"]]
 
     if not items:
-        conn.close()
         return {
             "success": False,
             "message": "Tiada kad DACUM untuk diproses",
@@ -671,7 +715,6 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
     openai_api_key = os.getenv("OPENAI_API_KEY")
 
     if not openai_api_key:
-        conn.close()
         return {
             "success": False,
             "message": "OPENAI_API_KEY belum ditetapkan. AI clustering diperlukan untuk membina CCPC yang berkualiti.",
@@ -902,17 +945,14 @@ DACUM task cards:
         cleaned_clusters = cleaned_clusters[:6]
 
         if len(cleaned_clusters) < 4:
-            conn.close()
             return {
                 "success": False,
                 "message": "AI tidak menghasilkan sekurang-kurangnya 4 Core Competency yang sah. Sila jalankan semula AI clustering atau semak input DACUM.",
                 "clusters": [],
             }
 
-        save_ccpc_clusters(cursor, request.session_id, cleaned_clusters)
-
-        conn.commit()
-        conn.close()
+        with engine.begin() as conn:
+            save_ccpc_clusters(conn, request.session_id, cleaned_clusters)
 
         try:
             from app.core.s3 import upload_json_to_s3
@@ -940,7 +980,6 @@ DACUM task cards:
         }
 
     except Exception as e:
-        conn.close()
         print("AI clustering error:", str(e))
 
         return {
@@ -952,22 +991,18 @@ DACUM task cards:
 
 @app.get("/ccpc/clusters/{session_id}")
 def get_ccpc_clusters(session_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT id, session_id, cluster_name, suggested_category, items_json, notes, created_at
-        FROM ccpc_clusters
-        WHERE session_id = ?
-        ORDER BY id ASC
-        """,
-        (session_id,),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, session_id, cluster_name, suggested_category, items_json, notes, created_at
+                FROM ccpc_clusters
+                WHERE session_id = :session_id
+                ORDER BY id ASC
+                """
+            ),
+            {"session_id": session_id},
+        ).mappings().all()
 
     clusters = []
 

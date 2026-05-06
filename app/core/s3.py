@@ -36,3 +36,23 @@ def backup_dacum_card(session_id: str, payload: dict):
         filename=filename,
         data=payload
     )
+
+
+def backup_cos_structure(project_id: str, payload: dict):
+    filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
+
+    return upload_json_to_s3(
+        folder=f"cocs-projects/{project_id}/cos",
+        filename=filename,
+        data=payload
+    )
+
+
+def backup_ccp_profile(project_id: str, payload: dict):
+    filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
+
+    return upload_json_to_s3(
+        folder=f"cocs-projects/{project_id}/ccp",
+        filename=filename,
+        data=payload
+    )
