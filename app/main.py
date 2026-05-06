@@ -160,6 +160,184 @@ def init_ccpc_db():
 
 init_ccpc_db()
 
+class COSStructurePayload(BaseModel):
+    matrix: dict | None = None
+    target: dict | None = None
+
+
+class CCPProfilePayload(BaseModel):
+    profiles: dict | None = None
+
+
+def init_cos_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cos_structures (
+            project_id TEXT PRIMARY KEY,
+            matrix_json TEXT NOT NULL,
+            target_json TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+init_cos_db()
+
+
+def init_ccp_profile_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ccp_profiles (
+            project_id TEXT PRIMARY KEY,
+            profiles_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+init_ccp_profile_db()
+
+
+@app.get("/cos/structure/{project_id}")
+def get_cos_structure(project_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT project_id, matrix_json, target_json, updated_at
+        FROM cos_structures
+        WHERE project_id = ?
+        """,
+        (project_id,),
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return {
+            "matrix": None,
+            "target": None,
+        }
+
+    return {
+        "project_id": row["project_id"],
+        "matrix": json.loads(row["matrix_json"]),
+        "target": json.loads(row["target_json"]) if row["target_json"] else None,
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/cos/structure/{project_id}")
+def save_cos_structure(project_id: str, payload: COSStructurePayload):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    updated_at = datetime.now().isoformat()
+
+    cursor.execute(
+        """
+        INSERT INTO cos_structures (project_id, matrix_json, target_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+            matrix_json = excluded.matrix_json,
+            target_json = excluded.target_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            project_id,
+            json.dumps(payload.matrix or {}, ensure_ascii=False),
+            json.dumps(payload.target, ensure_ascii=False) if payload.target else None,
+            updated_at,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "updated_at": updated_at,
+    }
+
+
+@app.get("/ccp/profile/{project_id}")
+def get_ccp_profile(project_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT project_id, profiles_json, updated_at
+        FROM ccp_profiles
+        WHERE project_id = ?
+        """,
+        (project_id,),
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return {
+            "project_id": project_id,
+            "profiles": {},
+            "updated_at": None,
+        }
+
+    return {
+        "project_id": row["project_id"],
+        "profiles": json.loads(row["profiles_json"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/ccp/profile/{project_id}")
+def save_ccp_profile(project_id: str, payload: CCPProfilePayload):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    updated_at = datetime.now().isoformat()
+
+    cursor.execute(
+        """
+        INSERT INTO ccp_profiles (project_id, profiles_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+            profiles_json = excluded.profiles_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            project_id,
+            json.dumps(payload.profiles or {}, ensure_ascii=False),
+            updated_at,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "updated_at": updated_at,
+    }
 
 @app.post("/ccpc/card")
 def create_ccpc_card(card: CCPCCardCreate):

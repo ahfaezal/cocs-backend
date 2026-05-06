@@ -1,4 +1,6 @@
 venv/
+venv38/
+.pydeps313/
 __pycache__/
 *.pyc
 .env
