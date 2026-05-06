@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
+from app.core.auth import require_roles
 from app.database.connection import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
@@ -42,7 +43,11 @@ def validate_status(status: str) -> None:
 
 
 @router.post("/", response_model=UserResponse)
-def create_user(payload: UserCreate, db: Session = Depends(get_db)):
+def create_user(
+    payload: UserCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
+):
     validate_role(payload.role)
     validate_status(payload.status or "ACTIVE")
 
@@ -80,12 +85,19 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=list[UserResponse])
-def list_users(db: Session = Depends(get_db)):
+def list_users(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
+):
     return db.query(User).order_by(User.id.asc()).all()
 
 
 @router.get("/{user_id}", response_model=UserResponse)
-def get_user(user_id: int, db: Session = Depends(get_db)):
+def get_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
+):
     user = db.query(User).filter(User.id == user_id).first()
 
     if not user:
@@ -95,7 +107,12 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
 
 
 @router.patch("/{user_id}", response_model=UserResponse)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)):
+def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
+):
     user = db.query(User).filter(User.id == user_id).first()
 
     if not user:
@@ -141,7 +158,11 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
+):
     user = db.query(User).filter(User.id == user_id).first()
 
     if not user:
