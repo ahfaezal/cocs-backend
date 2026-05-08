@@ -185,6 +185,10 @@ class CCPProfilePayload(BaseModel):
     profiles: dict | None = None
 
 
+class CSPContentPayload(BaseModel):
+    sections: dict | None = None
+
+
 def init_cos_db():
     with engine.begin() as conn:
         conn.execute(
@@ -220,6 +224,24 @@ def init_ccp_profile_db():
 
 
 init_ccp_profile_db()
+
+
+def init_csp_content_db():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS csp_contents (
+                    project_id TEXT PRIMARY KEY,
+                    sections_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+
+init_csp_content_db()
 
 
 @app.get("/cos/structure/{project_id}")
@@ -362,6 +384,78 @@ def save_ccp_profile(project_id: str, payload: CCPProfilePayload):
         )
     except Exception as e:
         print("S3 CCP profile backup failed:", str(e))
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "updated_at": updated_at,
+    }
+
+
+@app.get("/csp/content/{project_id}")
+def get_csp_content(project_id: str):
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT project_id, sections_json, updated_at
+                FROM csp_contents
+                WHERE project_id = :project_id
+                """
+            ),
+            {"project_id": project_id},
+        ).mappings().first()
+
+    if not row:
+        return {
+            "project_id": project_id,
+            "sections": {},
+            "updated_at": None,
+        }
+
+    return {
+        "project_id": row["project_id"],
+        "sections": json.loads(row["sections_json"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/csp/content/{project_id}")
+def save_csp_content(project_id: str, payload: CSPContentPayload):
+    updated_at = datetime.now().isoformat()
+    sections = payload.sections or {}
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO csp_contents (project_id, sections_json, updated_at)
+                VALUES (:project_id, :sections_json, :updated_at)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    sections_json = excluded.sections_json,
+                    updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "project_id": project_id,
+                "sections_json": json.dumps(sections, ensure_ascii=False),
+                "updated_at": updated_at,
+            },
+        )
+
+    try:
+        from app.core.s3 import backup_csp_content
+
+        backup_csp_content(
+            project_id=project_id,
+            payload={
+                "project_id": project_id,
+                "sections": sections,
+                "updated_at": updated_at,
+            },
+        )
+    except Exception as e:
+        print("S3 CSP content backup failed:", str(e))
 
     return {
         "success": True,
