@@ -6,7 +6,7 @@ from app.database.connection import get_db
 from app.models.project import Project
 from app.models.project_assignment import ProjectAssignment
 from app.models.user import User
-from app.schemas.project import ProjectCreate, ProjectResponse
+from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
@@ -98,6 +98,50 @@ def get_project(
     if not assignment:
         raise HTTPException(status_code=403, detail="Project access denied")
 
+    return project
+
+
+@router.patch("/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id: int,
+    payload: ProjectUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("SUPER_ADMIN", "PROJECT_MANAGER")),
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    if "title" in updates or "subsector" in updates or "level" in updates:
+        next_title = updates.get("title", project.title)
+        next_subsector = updates.get("subsector", project.subsector)
+        next_level = updates.get("level", project.level)
+
+        existing_project = (
+            db.query(Project)
+            .filter(
+                Project.id != project_id,
+                Project.title == next_title,
+                Project.subsector == next_subsector,
+                Project.level == next_level,
+            )
+            .first()
+        )
+
+        if existing_project:
+            raise HTTPException(
+                status_code=409,
+                detail="Project with the same title, subsector and level already exists",
+            )
+
+    for field, value in updates.items():
+        setattr(project, field, value)
+
+    db.commit()
+    db.refresh(project)
     return project
 
 
