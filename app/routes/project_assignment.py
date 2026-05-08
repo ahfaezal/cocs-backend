@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.auth import require_roles
 from app.database.connection import get_db
 from app.models.project import Project
 from app.models.project_assignment import ProjectAssignment
@@ -36,6 +37,7 @@ def validate_status(status: str) -> None:
 def create_project_assignment(
     payload: ProjectAssignmentCreate,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
 ):
     validate_assignment_role(payload.assignment_role)
     validate_status(payload.status or "ACTIVE")
@@ -76,7 +78,10 @@ def create_project_assignment(
 
 
 @router.get("/", response_model=list[ProjectAssignmentResponse])
-def list_project_assignments(db: Session = Depends(get_db)):
+def list_project_assignments(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
+):
     return db.query(ProjectAssignment).order_by(ProjectAssignment.id.asc()).all()
 
 
@@ -84,6 +89,7 @@ def list_project_assignments(db: Session = Depends(get_db)):
 def list_project_assignments_by_project(
     project_id: int,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
 ):
     return (
         db.query(ProjectAssignment)
@@ -97,6 +103,7 @@ def list_project_assignments_by_project(
 def list_project_assignments_by_user(
     user_id: int,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
 ):
     return (
         db.query(ProjectAssignment)
@@ -111,6 +118,7 @@ def update_project_assignment(
     assignment_id: int,
     payload: ProjectAssignmentUpdate,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
 ):
     assignment = (
         db.query(ProjectAssignment)
@@ -142,6 +150,7 @@ def update_project_assignment(
 def delete_project_assignment(
     assignment_id: int,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_roles("SUPER_ADMIN")),
 ):
     assignment = (
         db.query(ProjectAssignment)
