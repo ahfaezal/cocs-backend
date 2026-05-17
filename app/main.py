@@ -131,6 +131,8 @@ app.include_router(reporting_route.router)
 class CCPCCardCreate(BaseModel):
     session_id: str
     panel_name: str
+    panel_position: str | None = None
+    panel_organization: str | None = None
     task_text: str
 
 
@@ -165,6 +167,33 @@ def init_ccpc_db():
                 """
             )
         )
+
+        if engine.dialect.name == "postgresql":
+            for column_name in ["panel_position", "panel_organization"]:
+                conn.execute(
+                    text(
+                        f"""
+                        ALTER TABLE ccpc_cards
+                        ADD COLUMN IF NOT EXISTS {column_name} TEXT
+                        """
+                    )
+                )
+        else:
+            existing_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(ccpc_cards)")).fetchall()
+            }
+
+            for column_name in ["panel_position", "panel_organization"]:
+                if column_name not in existing_columns:
+                    conn.execute(
+                        text(
+                            f"""
+                            ALTER TABLE ccpc_cards
+                            ADD COLUMN {column_name} TEXT
+                            """
+                        )
+                    )
 
         conn.execute(
             text(
@@ -482,14 +511,16 @@ def create_ccpc_card(card: CCPCCardCreate):
                 text(
                     """
                     INSERT INTO ccpc_cards
-                    (session_id, panel_name, task_text, status, created_at)
-                    VALUES (:session_id, :panel_name, :task_text, :status, :created_at)
+                    (session_id, panel_name, panel_position, panel_organization, task_text, status, created_at)
+                    VALUES (:session_id, :panel_name, :panel_position, :panel_organization, :task_text, :status, :created_at)
                     RETURNING id
                     """
                 ),
                 {
                     "session_id": card.session_id,
                     "panel_name": card.panel_name or "Panel",
+                    "panel_position": card.panel_position or "",
+                    "panel_organization": card.panel_organization or "",
                     "task_text": card.task_text,
                     "status": "active",
                     "created_at": created_at,
@@ -500,13 +531,15 @@ def create_ccpc_card(card: CCPCCardCreate):
                 text(
                     """
                     INSERT INTO ccpc_cards
-                    (session_id, panel_name, task_text, status, created_at)
-                    VALUES (:session_id, :panel_name, :task_text, :status, :created_at)
+                    (session_id, panel_name, panel_position, panel_organization, task_text, status, created_at)
+                    VALUES (:session_id, :panel_name, :panel_position, :panel_organization, :task_text, :status, :created_at)
                     """
                 ),
                 {
                     "session_id": card.session_id,
                     "panel_name": card.panel_name or "Panel",
+                    "panel_position": card.panel_position or "",
+                    "panel_organization": card.panel_organization or "",
                     "task_text": card.task_text,
                     "status": "active",
                     "created_at": created_at,
@@ -525,6 +558,8 @@ def create_ccpc_card(card: CCPCCardCreate):
                 "id": card_id,
                 "session_id": card.session_id,
                 "panel_name": card.panel_name or "Panel",
+                "panel_position": card.panel_position or "",
+                "panel_organization": card.panel_organization or "",
                 "task_text": card.task_text,
                 "status": "active",
                 "created_at": created_at,
@@ -547,7 +582,7 @@ def get_ccpc_cards(session_id: str):
         rows = conn.execute(
             text(
                 """
-                SELECT id, session_id, panel_name, task_text, status, created_at
+                SELECT id, session_id, panel_name, panel_position, panel_organization, task_text, status, created_at
                 FROM ccpc_cards
                 WHERE session_id = :session_id
                 ORDER BY id DESC
