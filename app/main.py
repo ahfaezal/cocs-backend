@@ -145,6 +145,12 @@ class CCPCClustersSavePayload(BaseModel):
     clusters: list[dict] = []
 
 
+class CCPCConsolidationPayload(BaseModel):
+    package_name: str
+    included_targets: list[dict] = []
+    source_clusters: list[dict] = []
+
+
 def init_ccpc_db():
     id_column = (
         "SERIAL PRIMARY KEY"
@@ -162,6 +168,19 @@ def init_ccpc_db():
                     panel_name TEXT NOT NULL,
                     task_text TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ccpc_packages (
+                    package_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    package_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
                 """
@@ -944,6 +963,9 @@ Competency level usage:
 3. Competency Units must be appropriate for the selected occupation titles and their level or package of levels.
 4. If multiple occupations or levels are selected, design a coherent CCPC that can support the package without ignoring lower or higher level expectations.
 5. Use selectedDevelopmentLevelDefinitions to calibrate complexity, autonomy, knowledge depth, supervision, planning and management expectations.
+6. Across selected occupation targets in the same occupational pillar, do not repeat identical Core Competency names.
+7. Core Competencies may be related progressively across levels, but each level must show clear progression in complexity, autonomy, scope, responsibility, tools, supervision, planning, coordination, or evaluation.
+8. For example, Level 1 may perform basic routine work under close supervision, Level 2 may execute operational work with limited autonomy, and Level 3 may coordinate or perform skilled work with broader responsibility.
 
 Important concept:
 DACUM cards are source evidence and discussion input for AI. Do NOT merely copy, count, or convert every DACUM card into one Competency Unit.
@@ -1353,6 +1375,149 @@ def save_finalised_ccpc_clusters(session_id: str, payload: CCPCClustersSavePaylo
         "success": True,
         "session_id": session_id,
         "total_clusters": len(cleaned_clusters),
+    }
+
+
+@app.get("/ccpc/packages/{session_id}")
+def get_ccpc_packages(session_id: str):
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT package_id, package_json, created_at
+                FROM ccpc_packages
+                WHERE session_id = :session_id
+                ORDER BY created_at ASC
+                """
+            ),
+            {"session_id": session_id},
+        ).mappings().all()
+
+    return [
+        {
+            "package_id": row["package_id"],
+            **json.loads(row["package_json"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+@app.post("/ccpc/packages/{session_id}/consolidate")
+def consolidate_ccpc_package(session_id: str, payload: CCPCConsolidationPayload):
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+
+    package_id = f"{session_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    created_at = datetime.utcnow().isoformat()
+
+    if not payload.source_clusters:
+        return {
+            "success": False,
+            "message": "Tiada cluster sumber untuk digabungkan.",
+        }
+
+    fallback_package = {
+        "packageId": package_id,
+        "packageName": payload.package_name,
+        "includedTargets": payload.included_targets,
+        "consolidatedClusters": payload.source_clusters,
+        "createdAt": created_at,
+        "mode": "fallback",
+    }
+
+    package = fallback_package
+
+    if openai_api_key:
+        prompt = f"""
+You are an expert COCS/NOSS CCPC consolidation specialist.
+
+Task:
+Create a consolidated CCPC package from multiple level-based CCPC sets without losing the intent of the original information.
+
+Rules:
+1. Review all source Core Competencies, Competency Units and draft Work Steps.
+2. Merge overlapping or closely related Core Competencies so the final package is not too large.
+3. Do not drop important source intent; preserve it by merging, renaming, or moving details into CU or Work Step summaries.
+4. Keep clear progression across included levels.
+5. Produce at least 4 Core Competencies.
+6. Each Core Competency must have at least 4 Competency Units.
+7. Each Competency Unit must have at least 4 draft Work Steps.
+8. Use concise Verb + Object + Qualifier naming.
+9. Return valid JSON only.
+
+Package name:
+{payload.package_name}
+
+Included targets:
+{json.dumps(payload.included_targets, ensure_ascii=False, indent=2)}
+
+Source clusters:
+{json.dumps(payload.source_clusters, ensure_ascii=False, indent=2)}
+
+Return format:
+{{
+  "packageName": "Package name",
+  "includedTargets": [],
+  "consolidatedClusters": [
+    {{
+      "clusterName": "Verb Object Qualifier",
+      "sourceLevels": [1, 2],
+      "sourceOccupations": ["Occupation"],
+      "items": ["Competency Unit"],
+      "workStepsMap": {{
+        "Competency Unit": ["Draft work step"]
+      }},
+      "coverageNotes": "How source information was preserved."
+    }}
+  ]
+}}
+"""
+
+        try:
+            client = OpenAI(api_key=openai_api_key)
+            completion = client.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Return valid JSON only. Consolidate CCPC sets without losing source intent.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            ai_result = json.loads(completion.choices[0].message.content)
+            package = {
+                "packageId": package_id,
+                "packageName": ai_result.get("packageName") or payload.package_name,
+                "includedTargets": ai_result.get("includedTargets") or payload.included_targets,
+                "consolidatedClusters": ai_result.get("consolidatedClusters") or [],
+                "createdAt": created_at,
+                "mode": "ai",
+            }
+        except Exception as e:
+            print("CCPC consolidation AI failed:", str(e))
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO ccpc_packages (package_id, session_id, package_json, created_at)
+                VALUES (:package_id, :session_id, :package_json, :created_at)
+                """
+            ),
+            {
+                "package_id": package_id,
+                "session_id": session_id,
+                "package_json": json.dumps(package, ensure_ascii=False),
+                "created_at": created_at,
+            },
+        )
+
+    return {
+        "success": True,
+        "package": package,
     }
 
 
