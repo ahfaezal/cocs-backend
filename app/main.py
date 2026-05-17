@@ -233,6 +233,23 @@ def init_ccpc_db():
 
 init_ccpc_db()
 
+
+def ensure_ccpc_packages_db():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ccpc_packages (
+                    package_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    package_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+
 class COSStructurePayload(BaseModel):
     matrix: dict | None = None
     target: dict | None = None
@@ -1380,6 +1397,8 @@ def save_finalised_ccpc_clusters(session_id: str, payload: CCPCClustersSavePaylo
 
 @app.get("/ccpc/packages/{session_id}")
 def get_ccpc_packages(session_id: str):
+    ensure_ccpc_packages_db()
+
     with engine.begin() as conn:
         rows = conn.execute(
             text(
@@ -1405,6 +1424,8 @@ def get_ccpc_packages(session_id: str):
 
 @app.post("/ccpc/packages/{session_id}/consolidate")
 def consolidate_ccpc_package(session_id: str, payload: CCPCConsolidationPayload):
+    ensure_ccpc_packages_db()
+
     openai_api_key = os.getenv("OPENAI_API_KEY")
 
     package_id = f"{session_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
