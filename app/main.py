@@ -136,6 +136,11 @@ class CCPCCardCreate(BaseModel):
 
 class CCPCClusterRequest(BaseModel):
     session_id: str
+    project_id: str | None = None
+
+
+class CCPCClustersSavePayload(BaseModel):
+    clusters: list[dict] = []
 
 
 def init_ccpc_db():
@@ -696,6 +701,9 @@ def save_ccpc_clusters(conn, session_id: str, clusters: list[dict]) -> None:
                     {
                         "items": cluster["items"],
                         "workStepsMap": cluster.get("workStepsMap", {}),
+                        "target": cluster.get("target", {}),
+                        "targetIndex": cluster.get("targetIndex"),
+                        "finalised": cluster.get("finalised", False),
                     },
                     ensure_ascii=False,
                 ),
@@ -721,6 +729,62 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
         ).mappings().all()
 
     items = [row["task_text"] for row in rows if row["task_text"]]
+
+    competency_level_definitions = {
+        1: "This level qualifies individuals who are competent with basic general and foundation knowledge and skills in a narrow range of areas of a field of work or learning in the construction industry and/or its respective sectors with close supervision.",
+        2: "This level qualifies individuals who are competent with basic factual or operational knowledge and skills in a selected number of areas of a field of work or learning in the construction industry and/or its respective sectors, and with limited autonomy and judgments to complete routine but variable tasks under the observation of supervisors.",
+        3: "This level qualifies individuals who are competent with broad operational and theoretical knowledge and skills of a field of work or learning in the construction industry and/or its respective sectors and perform clearly defined but limited responsibility in varied contexts to undertake skilled work.",
+        4: "This level qualifies individuals who are competent with a broad knowledge base with some specialised knowledge and skills of a field of work or learning in the construction industry and/or its respective sectors, and with initiative and judgment to organise the work of self and others and plan, coordinate and evaluate the work of teams within broad but generally well-defined parameters.",
+        5: "This level qualifies individuals who are competent in applying an integrated technical and theoretical concept in a broad range of contexts in the construction industry and/or its respective sectors to undertake advanced skilled or professional work and with initiative and judgment to organise the work of self and others and plan, coordinate and evaluate the work of teams within broad but generally specialised parameters.",
+        6: "This level qualifies individuals who are competent in applying a specialised knowledge in a range of environment to undertake advanced skilled or professional work and across a broad range of technical or management functions and systematically and effectively resolve complicated and unpredictable issues.",
+    }
+
+    cos_context = {
+        "selectedDevelopmentLevels": [],
+        "selectedDevelopmentLevelDefinitions": {},
+        "selectedDevelopmentTargets": [],
+        "target": None,
+        "matrix": None,
+    }
+
+    if request.project_id:
+        with engine.begin() as conn:
+            cos_row = conn.execute(
+                text(
+                    """
+                    SELECT matrix_json, target_json
+                    FROM cos_structures
+                    WHERE project_id = :project_id
+                    """
+                ),
+                {"project_id": request.project_id},
+            ).mappings().first()
+
+        if cos_row:
+            matrix = json.loads(cos_row["matrix_json"]) if cos_row["matrix_json"] else {}
+            selected_targets = matrix.get("selectedDevelopmentTargets", [])
+            selected_levels = matrix.get("selectedDevelopmentLevels", [])
+
+            if selected_targets:
+                selected_levels = sorted(
+                    {
+                        int(target.get("level"))
+                        for target in selected_targets
+                        if isinstance(target, dict) and str(target.get("level", "")).isdigit()
+                    }
+                )
+
+            cos_context = {
+                "selectedDevelopmentLevels": selected_levels,
+                "selectedDevelopmentLevelDefinitions": {
+                    str(level): competency_level_definitions.get(int(level), "")
+                    for level in selected_levels
+                    if str(level).isdigit()
+                },
+                "selectedDevelopmentTargets": selected_targets,
+                "target": json.loads(cos_row["target_json"]) if cos_row["target_json"] else None,
+                "matrix": matrix,
+            }
 
     if not items:
         return {
@@ -818,28 +882,51 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
 
     client = OpenAI(api_key=openai_api_key)
 
+    selected_targets_for_ai = cos_context.get("selectedDevelopmentTargets") or []
+
+    if not selected_targets_for_ai and cos_context.get("target"):
+        selected_targets_for_ai = [cos_context["target"]]
+
     prompt = f"""
 You are an expert in DACUM, NOSS, TVET competency standards, Micro Credential design, and CIDB Construction Occupational Competency Standards (COCS).
 
 Task:
-Analyse the DACUM task cards and create a proper Construction Competency Profile Chart (CCPC) structure:
+Analyse the DACUM task cards and create proper Construction Competency Profile Chart (CCPC) structures.
+Generate one complete CCPC set for EACH selected COS occupation target:
+{json.dumps(selected_targets_for_ai, ensure_ascii=False, indent=2)}
+
+Each CCPC set must include:
 - Core Competency (CC)
 - Competency Unit (CU)
+- Draft Work Step summary for every CU
+
+Project and COS context:
+{json.dumps(cos_context, ensure_ascii=False, indent=2)}
+
+Competency level usage:
+1. The selectedDevelopmentTargets are the approved occupation titles from COS to be developed into CCPC.
+2. The selectedDevelopmentLevels are derived from those selected COS occupation titles.
+3. Competency Units must be appropriate for the selected occupation titles and their level or package of levels.
+4. If multiple occupations or levels are selected, design a coherent CCPC that can support the package without ignoring lower or higher level expectations.
+5. Use selectedDevelopmentLevelDefinitions to calibrate complexity, autonomy, knowledge depth, supervision, planning and management expectations.
 
 Important concept:
-DACUM cards are raw evidence only. Do NOT convert every DACUM card into one Competency Unit.
-Some DACUM cards should be used later in CCP as Work Step or Performance Criteria.
-Only use DACUM cards that are suitable to form broad Competency Units.
+DACUM cards are source evidence and discussion input for AI. Do NOT merely copy, count, or convert every DACUM card into one Competency Unit.
+Use DACUM cards together with project title, COS, selected occupation target, level definition, sector, subsector, area, and construction industry practice.
+You may enrich the CCPC with additional domain-relevant competency content where needed so the output is complete, strong and certifiable.
+Some DACUM cards may be better used as Work Step or Performance Criteria evidence later, not necessarily as Competency Units.
 
 CCPC rules:
-1. Produce 4 to 6 Core Competencies only.
-2. Each Core Competency must contain 4 to 6 Competency Units.
-3. Do not force all DACUM cards into CCPC.
-4. Do not create catch-all clusters such as Remaining Work, General Work, Review Activities, Miscellaneous, or Other.
-5. Each Core Competency must represent a certifiable micro credential.
-6. Each Core Competency must represent a Product, Service, or Measurable Work Outcome.
-7. Each Competency Unit must be broad enough to generate at least 5 Work Steps later in CCP.
-8. Competency Units must be arranged logically from start to completion.
+1. For EACH selected occupation target, produce at least 4 Core Competencies.
+2. Each Core Competency must contain at least 4 Competency Units.
+3. Each Competency Unit must contain at least 4 draft Work Steps in workStepsMap.
+4. Do not limit the result to exactly 4. Generate 5, 6 or more where needed for a strong CCPC.
+5. Do not force all DACUM cards into CCPC.
+6. Do not create catch-all clusters such as Remaining Work, General Work, Review Activities, Miscellaneous, or Other.
+7. Each Core Competency must represent a certifiable micro credential.
+8. Each Core Competency must represent a Product, Service, or Measurable Work Outcome.
+9. Each Competency Unit must be broad enough to generate at least 4 Work Steps later in CCP.
+10. Competency Units must be arranged logically from start to completion.
 
 Naming rules:
 1. Core Competency names must use Verb + Object + Qualifier.
@@ -848,7 +935,7 @@ Naming rules:
 4. Avoid overly small task wording.
 
 Work Step Summary Rules:
-1. For every Competency Unit in "items", generate 4 to 6 draft Work Steps.
+1. For every Competency Unit in "items", generate at least 4 draft Work Steps.
 2. Work Steps must explain the activity flow from start to completion.
 3. Work Steps are only discussion draft for Summary Mode, not final CCP output.
 4. Work Steps must be concise and start with an action verb.
@@ -917,26 +1004,32 @@ Return valid JSON only. No markdown. No explanation outside JSON.
 
 Return format:
 {{
-  "clusters": [
+  "ccpcSets": [
     {{
-      "clusterName": "Verb Object Qualifier",
-      "suggestedCategory": "Core Candidate",
-      "items": [
-        "Verb Object Qualifier",
-        "Verb Object Qualifier",
-        "Verb Object Qualifier",
-        "Verb Object Qualifier"
-      ],
-      "workStepsMap": {{
-        "Verb Object Qualifier": [
-          "Prepare work requirement",
-          "Inspect work condition",
-          "Perform work activity",
-          "Verify completed work",
-          "Record work result"
-        ]
-      }},
-      "notes": "Short rationale explaining the product, service, or outcome represented by this Core Competency."
+      "occupationTitle": "Selected COS occupation title",
+      "level": 1,
+      "subarea": "Selected COS subarea",
+      "clusters": [
+        {{
+          "clusterName": "Verb Object Qualifier",
+          "suggestedCategory": "Core Candidate",
+          "items": [
+            "Verb Object Qualifier",
+            "Verb Object Qualifier",
+            "Verb Object Qualifier",
+            "Verb Object Qualifier"
+          ],
+          "workStepsMap": {{
+            "Verb Object Qualifier": [
+              "Prepare work requirement",
+              "Inspect work condition",
+              "Perform work activity",
+              "Verify completed work"
+            ]
+          }},
+          "notes": "Short rationale explaining the product, service, or outcome represented by this Core Competency."
+        }}
+      ]
     }}
   ]
 }}
@@ -970,86 +1063,133 @@ DACUM task cards:
 
         ai_content = completion.choices[0].message.content
         ai_result = json.loads(ai_content)
-        clusters = ai_result.get("clusters", [])
+        raw_sets = ai_result.get("ccpcSets") or []
 
-        cleaned_clusters = []
-        used_cluster_names = set()
-
-        for cluster in clusters:
-            if not isinstance(cluster, dict):
-                continue
-
-            cluster_name = clean_title(cluster.get("clusterName", ""))
-            suggested_category = clean_title(
-                cluster.get("suggestedCategory", "Core Candidate")
-            )
-            notes = clean_title(cluster.get("notes", ""))
-
-            if suggested_category not in [
-                "Core Candidate",
-                "Elective Candidate",
-                "Review Required",
-            ]:
-                suggested_category = "Core Candidate"
-
-            if not is_valid_title(cluster_name):
-                continue
-
-            cluster_key = cluster_name.lower()
-
-            if cluster_key in used_cluster_names:
-                continue
-
-            valid_items = normalize_items(cluster.get("items", []))
-
-            if len(valid_items) < 3:
-                continue
-
-            valid_items = valid_items[:6]
-
-            used_cluster_names.add(cluster_key)
-
-            raw_work_steps_map = cluster.get("workStepsMap", {})
-            cleaned_work_steps_map = {}
-
-            if isinstance(raw_work_steps_map, dict):
-                for unit_title in valid_items:
-                    raw_steps = raw_work_steps_map.get(unit_title, [])
-
-                    if not isinstance(raw_steps, list):
-                        raw_steps = []
-
-                    cleaned_steps = [
-                        str(step).strip()
-                        for step in raw_steps
-                        if isinstance(step, str) and step.strip()
-                    ]
-
-                    cleaned_work_steps_map[unit_title] = cleaned_steps[:6]
-
-
-            cleaned_clusters.append(
+        if not raw_sets and ai_result.get("clusters"):
+            fallback_target = selected_targets_for_ai[0] if selected_targets_for_ai else {}
+            raw_sets = [
                 {
+                    "occupationTitle": fallback_target.get("occupationTitle", ""),
+                    "level": fallback_target.get("level"),
+                    "subarea": fallback_target.get("subarea", ""),
+                    "clusters": ai_result.get("clusters", []),
+                }
+            ]
+
+        cleaned_sets = []
+        flattened_clusters = []
+
+        for set_index, ccpc_set in enumerate(raw_sets):
+            if not isinstance(ccpc_set, dict):
+                continue
+
+            fallback_target = (
+                selected_targets_for_ai[set_index]
+                if set_index < len(selected_targets_for_ai)
+                else {}
+            )
+            occupation_title = clean_title(
+                ccpc_set.get("occupationTitle")
+                or fallback_target.get("occupationTitle", "")
+            )
+            subarea = clean_title(ccpc_set.get("subarea") or fallback_target.get("subarea", ""))
+            level = ccpc_set.get("level") or fallback_target.get("level")
+            raw_clusters = ccpc_set.get("clusters", [])
+            cleaned_clusters = []
+            used_cluster_names = set()
+
+            for cluster in raw_clusters:
+                if not isinstance(cluster, dict):
+                    continue
+
+                cluster_name = clean_title(cluster.get("clusterName", ""))
+                suggested_category = clean_title(
+                    cluster.get("suggestedCategory", "Core Candidate")
+                )
+                notes = clean_title(cluster.get("notes", ""))
+
+                if suggested_category not in [
+                    "Core Candidate",
+                    "Elective Candidate",
+                    "Review Required",
+                ]:
+                    suggested_category = "Core Candidate"
+
+                if not is_valid_title(cluster_name):
+                    continue
+
+                cluster_key = cluster_name.lower()
+
+                if cluster_key in used_cluster_names:
+                    continue
+
+                valid_items = normalize_items(cluster.get("items", []))
+
+                if len(valid_items) < 4:
+                    continue
+
+                valid_items = valid_items[:8]
+
+                used_cluster_names.add(cluster_key)
+
+                raw_work_steps_map = cluster.get("workStepsMap", {})
+                cleaned_work_steps_map = {}
+
+                if isinstance(raw_work_steps_map, dict):
+                    for unit_title in valid_items:
+                        raw_steps = raw_work_steps_map.get(unit_title, [])
+
+                        if not isinstance(raw_steps, list):
+                            raw_steps = []
+
+                        cleaned_steps = [
+                            str(step).strip()
+                            for step in raw_steps
+                            if isinstance(step, str) and step.strip()
+                        ]
+
+                        cleaned_work_steps_map[unit_title] = cleaned_steps[:8]
+
+                cleaned_cluster = {
                     "clusterName": cluster_name,
                     "suggestedCategory": suggested_category,
                     "items": valid_items,
                     "workStepsMap": cleaned_work_steps_map,
                     "notes": notes
                     or "Cluster dijana berdasarkan gabungan aktiviti kerja yang menghasilkan produk, perkhidmatan atau keputusan kerja yang boleh dipersijilkan.",
+                    "target": {
+                        "occupationTitle": occupation_title,
+                        "level": level,
+                        "subarea": subarea,
+                    },
+                    "targetIndex": set_index,
                 }
-            )
+                cleaned_clusters.append(cleaned_cluster)
 
-        cleaned_clusters = cleaned_clusters[:6]
+            cleaned_clusters = cleaned_clusters[:8]
 
-        if len(cleaned_clusters) < 4:
+            if len(cleaned_clusters) < 4:
+                continue
+
+            cleaned_set = {
+                "occupationTitle": occupation_title,
+                "level": level,
+                "subarea": subarea,
+                "clusters": cleaned_clusters,
+            }
+            cleaned_sets.append(cleaned_set)
+            flattened_clusters.extend(cleaned_clusters)
+
+        if len(cleaned_sets) == 0:
             return {
                 "success": False,
-                "message": "AI tidak menghasilkan sekurang-kurangnya 4 Core Competency yang sah. Sila jalankan semula AI clustering atau semak input DACUM.",
+                "message": "AI tidak menghasilkan CCPC set yang lengkap. Setiap jawatan memerlukan sekurang-kurangnya 4 Core Competency dan setiap Core Competency sekurang-kurangnya 4 Competency Unit.",
                 "clusters": [],
+                "ccpcSets": [],
             }
 
         with engine.begin() as conn:
-            save_ccpc_clusters(conn, request.session_id, cleaned_clusters)
+            save_ccpc_clusters(conn, request.session_id, flattened_clusters)
 
         try:
             from app.core.s3 import upload_json_to_s3
@@ -1060,8 +1200,10 @@ DACUM task cards:
                 data={
                     "session_id": request.session_id,
                     "total_items": len(items),
-                    "total_clusters": len(cleaned_clusters),
-                    "clusters": cleaned_clusters,
+                    "total_clusters": len(flattened_clusters),
+                    "total_sets": len(cleaned_sets),
+                    "clusters": flattened_clusters,
+                    "ccpcSets": cleaned_sets,
                     "created_at": datetime.utcnow().isoformat(),
                 },
             )
@@ -1072,8 +1214,10 @@ DACUM task cards:
             "success": True,
             "session_id": request.session_id,
             "total_items": len(items),
-            "total_clusters": len(cleaned_clusters),
-            "clusters": cleaned_clusters,
+            "total_clusters": len(flattened_clusters),
+            "total_sets": len(cleaned_sets),
+            "clusters": flattened_clusters,
+            "ccpcSets": cleaned_sets,
         }
 
     except Exception as e:
@@ -1109,9 +1253,15 @@ def get_ccpc_clusters(session_id: str):
         if isinstance(items_payload, dict):
             items = items_payload.get("items", [])
             work_steps_map = items_payload.get("workStepsMap", {})
+            target = items_payload.get("target", {})
+            target_index = items_payload.get("targetIndex")
+            finalised = bool(items_payload.get("finalised", False))
         else:
             items = items_payload
             work_steps_map = {}
+            target = {}
+            target_index = None
+            finalised = False
 
         clusters.append(
             {
@@ -1121,12 +1271,54 @@ def get_ccpc_clusters(session_id: str):
                 "suggestedCategory": row["suggested_category"],
                 "items": items,
                 "workStepsMap": work_steps_map,
+                "target": target,
+                "targetIndex": target_index,
+                "finalised": finalised,
                 "notes": row["notes"],
                 "created_at": row["created_at"],
             }
         )
 
     return clusters
+
+
+@app.post("/ccpc/clusters/{session_id}")
+def save_finalised_ccpc_clusters(session_id: str, payload: CCPCClustersSavePayload):
+    cleaned_clusters = []
+
+    for cluster in payload.clusters:
+        if not isinstance(cluster, dict):
+            continue
+
+        cluster_name = str(
+            cluster.get("clusterName") or cluster.get("suggestedName") or ""
+        ).strip()
+        items = cluster.get("items", [])
+
+        if not cluster_name or not isinstance(items, list):
+            continue
+
+        cleaned_clusters.append(
+            {
+                "clusterName": cluster_name,
+                "suggestedCategory": cluster.get("suggestedCategory", "Core Candidate"),
+                "items": [str(item).strip() for item in items if str(item).strip()],
+                "workStepsMap": cluster.get("workStepsMap", {}),
+                "target": cluster.get("target", {}),
+                "targetIndex": cluster.get("targetIndex"),
+                "finalised": bool(cluster.get("finalised", False)),
+                "notes": cluster.get("notes", ""),
+            }
+        )
+
+    with engine.begin() as conn:
+        save_ccpc_clusters(conn, session_id, cleaned_clusters)
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "total_clusters": len(cleaned_clusters),
+    }
 
 
 @app.get("/")
