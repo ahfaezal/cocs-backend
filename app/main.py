@@ -291,6 +291,10 @@ class CCPProfilePayload(BaseModel):
     profiles: dict | None = None
 
 
+class CCCProfilePayload(BaseModel):
+    profiles: dict | None = None
+
+
 class CSPContentPayload(BaseModel):
     sections: dict | None = None
 
@@ -330,6 +334,24 @@ def init_ccp_profile_db():
 
 
 init_ccp_profile_db()
+
+
+def init_ccc_profile_db():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ccc_profiles (
+                    project_id TEXT PRIMARY KEY,
+                    profiles_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+
+init_ccc_profile_db()
 
 
 def init_csp_content_db():
@@ -490,6 +512,64 @@ def save_ccp_profile(project_id: str, payload: CCPProfilePayload):
         )
     except Exception as e:
         print("S3 CCP profile backup failed:", str(e))
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "updated_at": updated_at,
+    }
+
+
+@app.get("/ccc/profile/{project_id}")
+def get_ccc_profile(project_id: str):
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT project_id, profiles_json, updated_at
+                FROM ccc_profiles
+                WHERE project_id = :project_id
+                """
+            ),
+            {"project_id": project_id},
+        ).mappings().first()
+
+    if not row:
+        return {
+            "project_id": project_id,
+            "profiles": {},
+            "updated_at": None,
+        }
+
+    return {
+        "project_id": row["project_id"],
+        "profiles": json.loads(row["profiles_json"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/ccc/profile/{project_id}")
+def save_ccc_profile(project_id: str, payload: CCCProfilePayload):
+    updated_at = datetime.now().isoformat()
+    profiles = payload.profiles or {}
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO ccc_profiles (project_id, profiles_json, updated_at)
+                VALUES (:project_id, :profiles_json, :updated_at)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    profiles_json = excluded.profiles_json,
+                    updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "project_id": project_id,
+                "profiles_json": json.dumps(profiles, ensure_ascii=False),
+                "updated_at": updated_at,
+            },
+        )
 
     return {
         "success": True,

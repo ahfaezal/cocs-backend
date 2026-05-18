@@ -144,6 +144,14 @@ def calculate_project_progress(db: Session, project: Project) -> int:
 
     if _has_row(
         db,
+        "ccc_profiles",
+        "project_id = :project_id",
+        {"project_id": str(project_id)},
+    ):
+        progress = max(progress, 75)
+
+    if _has_row(
+        db,
         "curriculum_units",
         """
         cu_id IN (
