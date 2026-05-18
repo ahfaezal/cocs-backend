@@ -145,6 +145,11 @@ class CCPCClustersSavePayload(BaseModel):
     clusters: list[dict] = []
 
 
+class CCPCSelectionSavePayload(BaseModel):
+    selected_document_keys: list[str] = []
+    clusters: list[dict] = []
+
+
 class CCPCConsolidationPayload(BaseModel):
     package_name: str
     included_targets: list[dict] = []
@@ -182,6 +187,18 @@ def init_ccpc_db():
                     session_id TEXT NOT NULL,
                     package_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ccpc_selections (
+                    session_id TEXT PRIMARY KEY,
+                    selection_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -244,6 +261,21 @@ def ensure_ccpc_packages_db():
                     session_id TEXT NOT NULL,
                     package_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+
+
+def ensure_ccpc_selections_db():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ccpc_selections (
+                    session_id TEXT PRIMARY KEY,
+                    selection_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -1392,6 +1424,91 @@ def save_finalised_ccpc_clusters(session_id: str, payload: CCPCClustersSavePaylo
         "success": True,
         "session_id": session_id,
         "total_clusters": len(cleaned_clusters),
+    }
+
+
+@app.get("/ccpc/selection/{session_id}")
+def get_ccpc_selection(session_id: str):
+    ensure_ccpc_selections_db()
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT selection_json, updated_at
+                FROM ccpc_selections
+                WHERE session_id = :session_id
+                """
+            ),
+            {"session_id": session_id},
+        ).mappings().first()
+
+    if not row:
+        return {
+            "selected_document_keys": [],
+            "clusters": [],
+            "updated_at": None,
+        }
+
+    selection = json.loads(row["selection_json"])
+    return {
+        "selected_document_keys": selection.get("selected_document_keys", []),
+        "clusters": selection.get("clusters", []),
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.post("/ccpc/selection/{session_id}")
+def save_ccpc_selection(session_id: str, payload: CCPCSelectionSavePayload):
+    ensure_ccpc_selections_db()
+
+    updated_at = datetime.utcnow().isoformat()
+    selection = {
+        "selected_document_keys": payload.selected_document_keys or [],
+        "clusters": payload.clusters or [],
+    }
+
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO ccpc_selections (session_id, selection_json, updated_at)
+                    VALUES (:session_id, :selection_json, :updated_at)
+                    ON CONFLICT (session_id)
+                    DO UPDATE SET
+                        selection_json = EXCLUDED.selection_json,
+                        updated_at = EXCLUDED.updated_at
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "selection_json": json.dumps(selection, ensure_ascii=False),
+                    "updated_at": updated_at,
+                },
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    INSERT OR REPLACE INTO ccpc_selections
+                        (session_id, selection_json, updated_at)
+                    VALUES (:session_id, :selection_json, :updated_at)
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "selection_json": json.dumps(selection, ensure_ascii=False),
+                    "updated_at": updated_at,
+                },
+            )
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "selected_document_keys": selection["selected_document_keys"],
+        "total_clusters": len(selection["clusters"]),
+        "updated_at": updated_at,
     }
 
 
