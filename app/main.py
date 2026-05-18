@@ -1659,6 +1659,38 @@ Return format:
     }
 
 
+@app.delete("/ccpc/packages/{session_id}/{package_id}")
+def delete_ccpc_package(session_id: str, package_id: str):
+    ensure_ccpc_packages_db()
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                DELETE FROM ccpc_packages
+                WHERE session_id = :session_id
+                  AND package_id = :package_id
+                """
+            ),
+            {
+                "session_id": session_id,
+                "package_id": package_id,
+            },
+        )
+
+    if result.rowcount == 0:
+        return {
+            "success": False,
+            "message": "Pakej gabungan tidak ditemui.",
+        }
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "deleted_package_id": package_id,
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "COCS Backend Running"}
