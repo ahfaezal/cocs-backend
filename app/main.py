@@ -1558,6 +1558,7 @@ def consolidate_ccpc_package(session_id: str, payload: CCPCConsolidationPayload)
         "packageId": package_id,
         "packageName": payload.package_name,
         "includedTargets": payload.included_targets,
+        "sourceClusters": payload.source_clusters,
         "consolidatedClusters": payload.source_clusters,
         "createdAt": created_at,
         "mode": "fallback",
@@ -1630,6 +1631,7 @@ Return format:
                 "packageId": package_id,
                 "packageName": ai_result.get("packageName") or payload.package_name,
                 "includedTargets": ai_result.get("includedTargets") or payload.included_targets,
+                "sourceClusters": payload.source_clusters,
                 "consolidatedClusters": ai_result.get("consolidatedClusters") or [],
                 "createdAt": created_at,
                 "mode": "ai",
@@ -1664,6 +1666,52 @@ def delete_ccpc_package(session_id: str, package_id: str):
     ensure_ccpc_packages_db()
 
     with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT package_json
+                FROM ccpc_packages
+                WHERE session_id = :session_id
+                  AND package_id = :package_id
+                """
+            ),
+            {
+                "session_id": session_id,
+                "package_id": package_id,
+            },
+        ).mappings().first()
+
+        package = json.loads(row["package_json"]) if row else {}
+        source_clusters = package.get("sourceClusters") or []
+
+        if source_clusters:
+            existing_clusters = get_ccpc_clusters(session_id)
+            package_target_keys = {
+                f"{str(target.get('level', '')).strip().lower()}|{str(target.get('occupationTitle', '')).strip().lower()}|{str(target.get('subarea', '')).strip().lower()}"
+                for target in package.get("includedTargets", [])
+                if isinstance(target, dict)
+            }
+
+            def target_key(cluster: dict) -> str:
+                target = cluster.get("target") or {}
+                if not isinstance(target, dict):
+                    target = {}
+                return "|".join(
+                    [
+                        str(target.get("level", "")).strip().lower(),
+                        str(target.get("occupationTitle", "")).strip().lower(),
+                        str(target.get("subarea", "")).strip().lower(),
+                    ]
+                )
+
+            restored_clusters = [
+                cluster
+                for cluster in existing_clusters
+                if target_key(cluster) not in package_target_keys
+            ]
+            restored_clusters.extend(source_clusters)
+            save_ccpc_clusters(conn, session_id, restored_clusters)
+
         result = conn.execute(
             text(
                 """
