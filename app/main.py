@@ -7,7 +7,7 @@ import os
 import sqlite3
 import json
 from openai import OpenAI
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.database.connection import engine, Base
 
@@ -138,6 +138,7 @@ class CCPCCardCreate(BaseModel):
 
 class CCPCClusterRequest(BaseModel):
     session_id: str
+    session_ids: list[str] | None = None
     project_id: str | None = None
 
 
@@ -898,17 +899,29 @@ def save_ccpc_clusters(conn, session_id: str, clusters: list[dict]) -> None:
 
 @app.post("/ccpc/cluster")
 def run_ccpc_clustering(request: CCPCClusterRequest):
+    requested_session_ids = request.session_ids or [request.session_id]
+    session_ids = []
+
+    for session_id in requested_session_ids:
+        cleaned_session_id = str(session_id or "").strip()
+
+        if cleaned_session_id and cleaned_session_id not in session_ids:
+            session_ids.append(cleaned_session_id)
+
+    if request.session_id not in session_ids:
+        session_ids.insert(0, request.session_id)
+
     with engine.begin() as conn:
         rows = conn.execute(
             text(
                 """
                 SELECT task_text
                 FROM ccpc_cards
-                WHERE session_id = :session_id
+                WHERE session_id IN :session_ids
                 ORDER BY id ASC
                 """
-            ),
-            {"session_id": request.session_id},
+            ).bindparams(bindparam("session_ids", expanding=True)),
+            {"session_ids": session_ids},
         ).mappings().all()
 
     items = [row["task_text"] for row in rows if row["task_text"]]
