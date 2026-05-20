@@ -1078,6 +1078,13 @@ Analyse the DACUM task cards and create proper Construction Competency Profile C
 Generate one complete CCPC set for EACH selected COS occupation target:
 {json.dumps(selected_targets_for_ai, ensure_ascii=False, indent=2)}
 
+Critical target coverage rule:
+- Return EXACTLY ONE ccpcSet for EVERY selected COS occupation target above.
+- Do not merge selected targets during initial clustering.
+- Do not skip a level because it appears similar to another level.
+- If three COS occupation targets are selected, the response must contain three ccpcSets.
+- Package merging is handled later by a separate feature, not during AI clustering.
+
 Each CCPC set must include:
 - Core Competency (CC)
 - Competency Unit (CU)
@@ -1262,109 +1269,241 @@ DACUM task cards:
                 }
             ]
 
-        cleaned_sets = []
-        flattened_clusters = []
-
-        for set_index, ccpc_set in enumerate(raw_sets):
-            if not isinstance(ccpc_set, dict):
-                continue
-
-            fallback_target = (
-                selected_targets_for_ai[set_index]
-                if set_index < len(selected_targets_for_ai)
-                else {}
+        def target_key_from_values(level, occupation_title, subarea):
+            return "|".join(
+                [
+                    str(level or "").strip().lower(),
+                    str(occupation_title or "").strip().lower(),
+                    str(subarea or "").strip().lower(),
+                ]
             )
-            occupation_title = clean_title(
-                ccpc_set.get("occupationTitle")
-                or fallback_target.get("occupationTitle", "")
-            )
-            subarea = clean_title(ccpc_set.get("subarea") or fallback_target.get("subarea", ""))
-            level = ccpc_set.get("level") or fallback_target.get("level")
-            raw_clusters = ccpc_set.get("clusters", [])
-            cleaned_clusters = []
-            used_cluster_names = set()
 
-            for cluster in raw_clusters:
-                if not isinstance(cluster, dict):
+        def target_key(target):
+            if not isinstance(target, dict):
+                return ""
+
+            return target_key_from_values(
+                target.get("level"),
+                target.get("occupationTitle", ""),
+                target.get("subarea", ""),
+            )
+
+        def find_target_index(level, occupation_title, subarea, fallback_index):
+            key = target_key_from_values(level, occupation_title, subarea)
+
+            for target_index, target in enumerate(selected_targets_for_ai):
+                if target_key(target) == key:
+                    return target_index
+
+            return fallback_index
+
+        def clean_ai_sets(raw_ai_sets, fallback_targets):
+            cleaned_sets_local = []
+            flattened_clusters_local = []
+
+            for set_index, ccpc_set in enumerate(raw_ai_sets):
+                if not isinstance(ccpc_set, dict):
                     continue
 
-                cluster_name = clean_title(cluster.get("clusterName", ""))
-                suggested_category = clean_title(
-                    cluster.get("suggestedCategory", "Core Candidate")
+                fallback_target = (
+                    fallback_targets[set_index]
+                    if set_index < len(fallback_targets)
+                    else {}
                 )
-                notes = clean_title(cluster.get("notes", ""))
+                occupation_title = clean_title(
+                    ccpc_set.get("occupationTitle")
+                    or fallback_target.get("occupationTitle", "")
+                )
+                subarea = clean_title(
+                    ccpc_set.get("subarea") or fallback_target.get("subarea", "")
+                )
+                level = ccpc_set.get("level") or fallback_target.get("level")
+                target_index = find_target_index(
+                    level, occupation_title, subarea, set_index
+                )
+                raw_clusters = ccpc_set.get("clusters", [])
+                cleaned_clusters = []
+                used_cluster_names = set()
 
-                if suggested_category not in [
-                    "Core Candidate",
-                    "Elective Candidate",
-                    "Review Required",
-                ]:
-                    suggested_category = "Core Candidate"
+                for cluster in raw_clusters:
+                    if not isinstance(cluster, dict):
+                        continue
 
-                if not is_valid_title(cluster_name):
+                    cluster_name = clean_title(cluster.get("clusterName", ""))
+                    suggested_category = clean_title(
+                        cluster.get("suggestedCategory", "Core Candidate")
+                    )
+                    notes = clean_title(cluster.get("notes", ""))
+
+                    if suggested_category not in [
+                        "Core Candidate",
+                        "Elective Candidate",
+                        "Review Required",
+                    ]:
+                        suggested_category = "Core Candidate"
+
+                    if not is_valid_title(cluster_name):
+                        continue
+
+                    cluster_key = cluster_name.lower()
+
+                    if cluster_key in used_cluster_names:
+                        continue
+
+                    valid_items = normalize_items(cluster.get("items", []))
+
+                    if len(valid_items) < 4:
+                        continue
+
+                    valid_items = valid_items[:8]
+
+                    used_cluster_names.add(cluster_key)
+
+                    raw_work_steps_map = cluster.get("workStepsMap", {})
+                    cleaned_work_steps_map = {}
+
+                    if isinstance(raw_work_steps_map, dict):
+                        for unit_title in valid_items:
+                            raw_steps = raw_work_steps_map.get(unit_title, [])
+
+                            if not isinstance(raw_steps, list):
+                                raw_steps = []
+
+                            cleaned_steps = [
+                                str(step).strip()
+                                for step in raw_steps
+                                if isinstance(step, str) and step.strip()
+                            ]
+
+                            cleaned_work_steps_map[unit_title] = cleaned_steps[:8]
+
+                    cleaned_cluster = {
+                        "clusterName": cluster_name,
+                        "suggestedCategory": suggested_category,
+                        "items": valid_items,
+                        "workStepsMap": cleaned_work_steps_map,
+                        "notes": notes
+                        or "Cluster dijana berdasarkan gabungan aktiviti kerja yang menghasilkan produk, perkhidmatan atau keputusan kerja yang boleh dipersijilkan.",
+                        "target": {
+                            "occupationTitle": occupation_title,
+                            "level": level,
+                            "subarea": subarea,
+                        },
+                        "targetIndex": target_index,
+                    }
+                    cleaned_clusters.append(cleaned_cluster)
+
+                cleaned_clusters = cleaned_clusters[:8]
+
+                if len(cleaned_clusters) < 4:
                     continue
 
-                cluster_key = cluster_name.lower()
-
-                if cluster_key in used_cluster_names:
-                    continue
-
-                valid_items = normalize_items(cluster.get("items", []))
-
-                if len(valid_items) < 4:
-                    continue
-
-                valid_items = valid_items[:8]
-
-                used_cluster_names.add(cluster_key)
-
-                raw_work_steps_map = cluster.get("workStepsMap", {})
-                cleaned_work_steps_map = {}
-
-                if isinstance(raw_work_steps_map, dict):
-                    for unit_title in valid_items:
-                        raw_steps = raw_work_steps_map.get(unit_title, [])
-
-                        if not isinstance(raw_steps, list):
-                            raw_steps = []
-
-                        cleaned_steps = [
-                            str(step).strip()
-                            for step in raw_steps
-                            if isinstance(step, str) and step.strip()
-                        ]
-
-                        cleaned_work_steps_map[unit_title] = cleaned_steps[:8]
-
-                cleaned_cluster = {
-                    "clusterName": cluster_name,
-                    "suggestedCategory": suggested_category,
-                    "items": valid_items,
-                    "workStepsMap": cleaned_work_steps_map,
-                    "notes": notes
-                    or "Cluster dijana berdasarkan gabungan aktiviti kerja yang menghasilkan produk, perkhidmatan atau keputusan kerja yang boleh dipersijilkan.",
-                    "target": {
-                        "occupationTitle": occupation_title,
-                        "level": level,
-                        "subarea": subarea,
-                    },
-                    "targetIndex": set_index,
+                cleaned_set = {
+                    "occupationTitle": occupation_title,
+                    "level": level,
+                    "subarea": subarea,
+                    "clusters": cleaned_clusters,
                 }
-                cleaned_clusters.append(cleaned_cluster)
+                cleaned_sets_local.append(cleaned_set)
+                flattened_clusters_local.extend(cleaned_clusters)
 
-            cleaned_clusters = cleaned_clusters[:8]
+            return cleaned_sets_local, flattened_clusters_local
 
-            if len(cleaned_clusters) < 4:
-                continue
+        cleaned_sets, flattened_clusters = clean_ai_sets(
+            raw_sets, selected_targets_for_ai
+        )
 
-            cleaned_set = {
-                "occupationTitle": occupation_title,
-                "level": level,
-                "subarea": subarea,
-                "clusters": cleaned_clusters,
+        expected_target_keys = {
+            target_key(target)
+            for target in selected_targets_for_ai
+            if target_key(target)
+        }
+        cleaned_target_keys = {
+            target_key_from_values(
+                cleaned_set.get("level"),
+                cleaned_set.get("occupationTitle", ""),
+                cleaned_set.get("subarea", ""),
+            )
+            for cleaned_set in cleaned_sets
+        }
+        missing_targets = [
+            target
+            for target in selected_targets_for_ai
+            if target_key(target) and target_key(target) not in cleaned_target_keys
+        ]
+
+        if missing_targets:
+            retry_prompt = f"""
+{prompt}
+
+CRITICAL RETRY:
+The previous response missed these selected COS occupation targets:
+{json.dumps(missing_targets, ensure_ascii=False, indent=2)}
+
+Generate complete ccpcSets ONLY for the missing targets above.
+Each missing target must have at least 4 Core Competencies, each Core Competency must have at least 4 Competency Units, and every Competency Unit must have at least 4 draft Work Steps in workStepsMap.
+Return valid JSON only using the same return format.
+"""
+
+            retry_completion = client.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a precise COCS/NOSS CCPC developer. "
+                            "Return valid JSON only. "
+                            "Generate missing CCPC target sets without merging levels."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": retry_prompt,
+                    },
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+
+            retry_content = retry_completion.choices[0].message.content
+            retry_result = json.loads(retry_content)
+            retry_raw_sets = retry_result.get("ccpcSets") or []
+            retry_cleaned_sets, retry_flattened_clusters = clean_ai_sets(
+                retry_raw_sets, missing_targets
+            )
+
+            for retry_set in retry_cleaned_sets:
+                retry_key = target_key_from_values(
+                    retry_set.get("level"),
+                    retry_set.get("occupationTitle", ""),
+                    retry_set.get("subarea", ""),
+                )
+
+                if retry_key in expected_target_keys and retry_key not in cleaned_target_keys:
+                    cleaned_sets.append(retry_set)
+                    cleaned_target_keys.add(retry_key)
+                    flattened_clusters.extend(
+                        [
+                            cluster
+                            for cluster in retry_flattened_clusters
+                            if target_key(cluster.get("target")) == retry_key
+                        ]
+                    )
+
+        still_missing_targets = [
+            target
+            for target in selected_targets_for_ai
+            if target_key(target) and target_key(target) not in cleaned_target_keys
+        ]
+
+        if still_missing_targets:
+            return {
+                "success": False,
+                "message": "AI tidak menghasilkan CCPC untuk semua tahap yang dipilih di COS. Sila jalankan semula AI Clustering.",
+                "missingTargets": still_missing_targets,
+                "clusters": [],
+                "ccpcSets": [],
             }
-            cleaned_sets.append(cleaned_set)
-            flattened_clusters.extend(cleaned_clusters)
 
         if len(cleaned_sets) == 0:
             return {
