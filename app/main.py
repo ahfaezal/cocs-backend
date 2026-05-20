@@ -1288,6 +1288,19 @@ DACUM task cards:
                 target.get("subarea", ""),
             )
 
+        def resolve_fallback_target(ccpc_set, fallback_targets, set_index):
+            ai_key = target_key_from_values(
+                ccpc_set.get("level"),
+                ccpc_set.get("occupationTitle", ""),
+                ccpc_set.get("subarea", ""),
+            )
+
+            for target in fallback_targets:
+                if target_key(target) == ai_key:
+                    return target
+
+            return fallback_targets[set_index] if set_index < len(fallback_targets) else {}
+
         def find_target_index(level, occupation_title, subarea, fallback_index):
             key = target_key_from_values(level, occupation_title, subarea)
 
@@ -1305,19 +1318,17 @@ DACUM task cards:
                 if not isinstance(ccpc_set, dict):
                     continue
 
-                fallback_target = (
-                    fallback_targets[set_index]
-                    if set_index < len(fallback_targets)
-                    else {}
+                fallback_target = resolve_fallback_target(
+                    ccpc_set, fallback_targets, set_index
                 )
                 occupation_title = clean_title(
-                    ccpc_set.get("occupationTitle")
-                    or fallback_target.get("occupationTitle", "")
+                    fallback_target.get("occupationTitle")
+                    or ccpc_set.get("occupationTitle", "")
                 )
                 subarea = clean_title(
-                    ccpc_set.get("subarea") or fallback_target.get("subarea", "")
+                    fallback_target.get("subarea") or ccpc_set.get("subarea", "")
                 )
-                level = ccpc_set.get("level") or fallback_target.get("level")
+                level = fallback_target.get("level") or ccpc_set.get("level")
                 target_index = find_target_index(
                     level, occupation_title, subarea, set_index
                 )
@@ -1432,63 +1443,171 @@ DACUM task cards:
             if target_key(target) and target_key(target) not in cleaned_target_keys
         ]
 
-        if missing_targets:
-            retry_prompt = f"""
-{prompt}
+        def build_missing_target_prompt(missing_target, attempt_number):
+            target_level = missing_target.get("level")
+            target_title = missing_target.get("occupationTitle", "")
+            target_subarea = missing_target.get("subarea", "")
 
-CRITICAL RETRY:
-The previous response missed these selected COS occupation targets:
-{json.dumps(missing_targets, ensure_ascii=False, indent=2)}
+            return f"""
+You must generate one complete CCPC set for exactly one selected COS target.
 
-Generate complete ccpcSets ONLY for the missing targets above.
-Each missing target must have at least 4 Core Competencies, each Core Competency must have at least 4 Competency Units, and every Competency Unit must have at least 4 draft Work Steps in workStepsMap.
-Return valid JSON only using the same return format.
+Selected COS target:
+{json.dumps(missing_target, ensure_ascii=False, indent=2)}
+
+Attempt: {attempt_number}
+
+Project and COS context:
+{json.dumps(cos_context, ensure_ascii=False, indent=2)}
+
+Level rule:
+- The CCPC must match Level {target_level} only.
+- Use the CSQF level definition in the COS context when deciding complexity, autonomy, responsibility, supervision, and scope.
+- Occupation title must be exactly: {target_title}
+- Subarea must be exactly: {target_subarea}
+
+Content rule:
+- DACUM cards are source evidence, not the full answer.
+- Use all DACUM cards as evidence and enrich with relevant AI domain knowledge for the selected occupation, level, subarea, and project.
+- Create broad certifiable Core Competencies, not tiny tasks.
+- Do not merge this target with any other level or occupation.
+- Do not repeat Core Competency names from other levels in the same occupational pillar.
+
+Minimum structure rule:
+- Return exactly one ccpcSet.
+- The ccpcSet must contain at least 4 Core Competencies.
+- Each Core Competency must contain at least 4 Competency Units.
+- Every Competency Unit must have at least 4 draft Work Steps in workStepsMap.
+- More than 4 is allowed when needed, but keep content focused and certifiable.
+
+Writing rule:
+- Core Competency, Competency Unit, and Work Step titles must use verb + object + qualifier.
+- Use concise English suitable for COCS/NOSS documentation.
+- Do not use generic filler such as Review Remaining Work Activities.
+
+Return valid JSON only. No markdown. No explanation outside JSON.
+
+Return format:
+{{
+  "ccpcSets": [
+    {{
+      "occupationTitle": "{target_title}",
+      "level": {json.dumps(target_level, ensure_ascii=False)},
+      "subarea": "{target_subarea}",
+      "clusters": [
+        {{
+          "clusterName": "Verb Object Qualifier",
+          "suggestedCategory": "Core Candidate",
+          "items": [
+            "Verb Object Qualifier",
+            "Verb Object Qualifier",
+            "Verb Object Qualifier",
+            "Verb Object Qualifier"
+          ],
+          "workStepsMap": {{
+            "Verb Object Qualifier": [
+              "Prepare work requirement",
+              "Inspect work condition",
+              "Perform work activity",
+              "Verify completed work"
+            ]
+          }},
+          "notes": "Short rationale explaining the product, service, or outcome represented by this Core Competency."
+        }}
+      ]
+    }}
+  ]
+}}
+
+DACUM task cards:
+{json.dumps(items, ensure_ascii=False, indent=2)}
 """
 
-            retry_completion = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[
+        def raw_sets_from_result(ai_payload, fallback_target):
+            payload_sets = ai_payload.get("ccpcSets") or []
+
+            if not payload_sets and ai_payload.get("clusters"):
+                payload_sets = [
                     {
-                        "role": "system",
-                        "content": (
-                            "You are a precise COCS/NOSS CCPC developer. "
-                            "Return valid JSON only. "
-                            "Generate missing CCPC target sets without merging levels."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": retry_prompt,
-                    },
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2,
-            )
+                        "occupationTitle": fallback_target.get("occupationTitle", ""),
+                        "level": fallback_target.get("level"),
+                        "subarea": fallback_target.get("subarea", ""),
+                        "clusters": ai_payload.get("clusters", []),
+                    }
+                ]
 
-            retry_content = retry_completion.choices[0].message.content
-            retry_result = json.loads(retry_content)
-            retry_raw_sets = retry_result.get("ccpcSets") or []
-            retry_cleaned_sets, retry_flattened_clusters = clean_ai_sets(
-                retry_raw_sets, missing_targets
-            )
+            return payload_sets
 
-            for retry_set in retry_cleaned_sets:
-                retry_key = target_key_from_values(
-                    retry_set.get("level"),
-                    retry_set.get("occupationTitle", ""),
-                    retry_set.get("subarea", ""),
-                )
+        if missing_targets:
+            for missing_target in missing_targets:
+                missing_key = target_key(missing_target)
 
-                if retry_key in expected_target_keys and retry_key not in cleaned_target_keys:
-                    cleaned_sets.append(retry_set)
-                    cleaned_target_keys.add(retry_key)
-                    flattened_clusters.extend(
-                        [
-                            cluster
-                            for cluster in retry_flattened_clusters
-                            if target_key(cluster.get("target")) == retry_key
-                        ]
+                for attempt_number in range(1, 3):
+                    retry_completion = client.chat.completions.create(
+                        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a precise COCS/NOSS CCPC developer. "
+                                    "Return valid JSON only. "
+                                    "Generate the requested missing CCPC target set only."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": build_missing_target_prompt(
+                                    missing_target, attempt_number
+                                ),
+                            },
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.15,
                     )
+
+                    retry_content = retry_completion.choices[0].message.content
+                    retry_result = json.loads(retry_content)
+                    retry_raw_sets = raw_sets_from_result(
+                        retry_result, missing_target
+                    )
+                    retry_cleaned_sets, retry_flattened_clusters = clean_ai_sets(
+                        retry_raw_sets, [missing_target]
+                    )
+                    target_was_added = False
+
+                    for retry_set in retry_cleaned_sets:
+                        retry_key = target_key_from_values(
+                            retry_set.get("level"),
+                            retry_set.get("occupationTitle", ""),
+                            retry_set.get("subarea", ""),
+                        )
+
+                        if (
+                            retry_key == missing_key
+                            and retry_key in expected_target_keys
+                            and retry_key not in cleaned_target_keys
+                        ):
+                            cleaned_sets.append(retry_set)
+                            cleaned_target_keys.add(retry_key)
+                            flattened_clusters.extend(
+                                [
+                                    cluster
+                                    for cluster in retry_flattened_clusters
+                                    if target_key(cluster.get("target")) == retry_key
+                                ]
+                            )
+                            target_was_added = True
+                            break
+
+                    if target_was_added:
+                        break
+
+                if missing_key in cleaned_target_keys:
+                    continue
+
+                print(
+                    "AI clustering missing target after focused retry:",
+                    missing_target,
+                )
 
         still_missing_targets = [
             target
