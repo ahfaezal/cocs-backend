@@ -1537,11 +1537,118 @@ DACUM task cards:
 
             return payload_sets
 
+        def make_panel_review_set(target):
+            occupation_title = clean_title(target.get("occupationTitle", ""))
+            subarea = clean_title(target.get("subarea", ""))
+            level = target.get("level")
+            subject = (
+                occupation_title.replace("(", "")
+                .replace(")", "")
+                .replace("/", " ")
+                .replace("&", " ")
+                .replace("  ", " ")
+                .strip()
+            )
+
+            if "jointer" in subject.lower():
+                subject = subject.replace("Jointer", "Jointing").replace(
+                    "jointer", "Jointing"
+                )
+
+            if not subject:
+                subject = clean_title(cos_context.get("target", "")) or "Occupational Work"
+
+            try:
+                level_number = int(level)
+            except (TypeError, ValueError):
+                level_number = 0
+
+            if level_number <= 1:
+                cluster_names = [
+                    f"Prepare {subject} Work",
+                    f"Assist {subject} Installation",
+                    f"Perform {subject} Routine Task",
+                    f"Record {subject} Activity",
+                ]
+            elif level_number == 2:
+                cluster_names = [
+                    f"Perform {subject} Installation",
+                    f"Inspect {subject} Quality",
+                    f"Maintain {subject} Operation",
+                    f"Record {subject} Report",
+                ]
+            else:
+                cluster_names = [
+                    f"Manage {subject} Operation",
+                    f"Coordinate {subject} Activity",
+                    f"Evaluate {subject} Quality",
+                    f"Document {subject} Performance",
+                ]
+
+            unit_verbs = [
+                "Prepare",
+                "Perform",
+                "Inspect",
+                "Record",
+            ]
+            unit_objects = [
+                "Work Requirement",
+                "Work Activity",
+                "Work Quality",
+                "Work Result",
+            ]
+            cleaned_clusters = []
+            target_index = find_target_index(level, occupation_title, subarea, 0)
+
+            for cluster_name in cluster_names:
+                cluster_focus = " ".join(cluster_name.split()[1:]).strip() or subject
+                items = [
+                    f"{verb} {cluster_focus} {unit_object}"
+                    for verb, unit_object in zip(unit_verbs, unit_objects)
+                ]
+                work_steps_map = {}
+
+                for unit_title in items:
+                    unit_activity = unit_title[0].lower() + unit_title[1:]
+                    work_steps_map[unit_title] = [
+                        f"Review {unit_activity} requirement",
+                        f"Prepare resources for {unit_activity}",
+                        f"Carry out {unit_activity}",
+                        f"Record {unit_activity} outcome",
+                    ]
+
+                cleaned_clusters.append(
+                    {
+                        "clusterName": cluster_name,
+                        "suggestedCategory": "Review Required",
+                        "items": items,
+                        "workStepsMap": work_steps_map,
+                        "notes": (
+                            "Cadangan tambahan dijana kerana maklumat DACUM untuk tahap ini "
+                            "belum mencukupi atau AI tidak menghasilkan set lengkap. "
+                            "Sila semak dan sahkan bersama ahli panel."
+                        ),
+                        "target": {
+                            "occupationTitle": occupation_title,
+                            "level": level,
+                            "subarea": subarea,
+                        },
+                        "targetIndex": target_index,
+                    }
+                )
+
+            return {
+                "occupationTitle": occupation_title,
+                "level": level,
+                "subarea": subarea,
+                "clusters": cleaned_clusters,
+            }
+
         if missing_targets:
             for missing_target in missing_targets:
                 missing_key = target_key(missing_target)
 
-                for attempt_number in range(1, 3):
+                for attempt_number in range(1, 2):
                     retry_completion = client.chat.completions.create(
                         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                         messages=[
@@ -1616,9 +1723,29 @@ DACUM task cards:
         ]
 
         if still_missing_targets:
+            for target in still_missing_targets:
+                review_set = make_panel_review_set(target)
+                review_key = target_key_from_values(
+                    review_set.get("level"),
+                    review_set.get("occupationTitle", ""),
+                    review_set.get("subarea", ""),
+                )
+
+                if review_key and review_key not in cleaned_target_keys:
+                    cleaned_sets.append(review_set)
+                    cleaned_target_keys.add(review_key)
+                    flattened_clusters.extend(review_set.get("clusters", []))
+
+            still_missing_targets = [
+                target
+                for target in selected_targets_for_ai
+                if target_key(target) and target_key(target) not in cleaned_target_keys
+            ]
+
+        if still_missing_targets:
             return {
                 "success": False,
-                "message": "AI tidak menghasilkan CCPC untuk semua tahap yang dipilih di COS. Sila jalankan semula AI Clustering.",
+                "message": "AI tidak menghasilkan CCPC untuk semua tahap yang dipilih di COS dan cadangan panel-review tidak dapat dibina.",
                 "missingTargets": still_missing_targets,
                 "clusters": [],
                 "ccpcSets": [],
