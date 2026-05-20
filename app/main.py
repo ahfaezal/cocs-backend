@@ -1025,6 +1025,25 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
         "leftover",
     }
 
+    generic_ccpc_terms = {
+        "work requirement",
+        "work activity",
+        "work quality",
+        "work result",
+        "performance work requirement",
+        "performance work activity",
+        "performance work quality",
+        "performance work result",
+        "operation work requirement",
+        "operation work activity",
+        "operation work quality",
+        "operation work result",
+        "activity work requirement",
+        "activity work activity",
+        "activity work quality",
+        "activity work result",
+    }
+
     def is_valid_title(value: str) -> bool:
         title = clean_title(value)
 
@@ -1043,6 +1062,9 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
         if any(term in text for term in catch_all_terms):
             return False
 
+        if any(term in text for term in generic_ccpc_terms):
+            return False
+
         return True
 
     def normalize_items(raw_items) -> list[str]:
@@ -1059,7 +1081,7 @@ def run_ccpc_clustering(request: CCPCClusterRequest):
             item_text = clean_title(item)
             item_key = item_text.lower()
 
-            if not item_text or item_key in seen:
+            if not item_text or item_key in seen or not is_valid_title(item_text):
                 continue
 
             seen.add(item_key)
@@ -1133,12 +1155,16 @@ CCPC rules:
 8. Each Core Competency must represent a Product, Service, or Measurable Work Outcome.
 9. Each Competency Unit must be broad enough to generate at least 4 Work Steps later in CCP.
 10. Competency Units must be arranged logically from start to completion.
+11. Do not create multiple Core Competencies with the same four Competency Unit pattern.
+12. If two Core Competencies only differ by a word such as Performance, Operation, Activity, or Quality, merge or rewrite them into clearly different work outcomes.
 
 Naming rules:
 1. Core Competency names must use Verb + Object + Qualifier.
 2. Competency Unit names must use Verb + Object + Qualifier.
 3. Do not use "and", "or", "/", or "&" in Core Competency names.
 4. Avoid overly small task wording.
+5. Competency Unit names must be specific to the actual work outcome, tool, component, process, inspection, installation, testing, documentation, safety control, or quality requirement.
+6. Do not use generic filler names such as Work Requirement, Work Activity, Work Quality, Work Result, Performance Work Requirement, Operation Work Activity, or Activity Work Quality.
 
 Work Step Summary Rules:
 1. For every Competency Unit in "items", generate at least 4 draft Work Steps.
@@ -1190,16 +1216,20 @@ Preferred verbs:
 - Service
 
 Good examples:
-- Inspect track condition
-- Measure track geometry
-- Install track rail component
-- Secure rail joint assembly
-- Maintain track ballast profile
-- Conduct railway maintenance
-- Record maintenance work
+- Prepare cable jointing materials
+- Install cable jointing kit
+- Perform cable splicing
+- Conduct insulation resistance test
+- Secure cable joint connection
+- Inspect cable termination quality
+- Record cable jointing report
 
 Bad examples:
 - Review Remaining Work Activities
+- Prepare Cable Jointing High Voltage Performance Work Requirement
+- Perform Cable Jointing High Voltage Operation Work Activity
+- Inspect Cable Jointing High Voltage Activity Work Quality
+- Record Cable Jointing High Voltage Quality Work Result
 - Inspect track alignment against approved gauge tolerance
 - Measure track gauge using calibrated gauge tool
 - Check rail level against design crossfall requirement
@@ -1496,6 +1526,8 @@ Writing rule:
 - Core Competency, Competency Unit, and Work Step titles must use verb + object + qualifier.
 - Use concise English suitable for COCS/NOSS documentation.
 - Do not use generic filler such as Review Remaining Work Activities.
+- Do not use generic Competency Unit patterns such as Work Requirement, Work Activity, Work Quality, Work Result, Performance Work Requirement, Operation Work Activity, or Activity Work Quality.
+- Every Competency Unit must describe a distinct technical work outcome for the selected occupation and level.
 
 Return valid JSON only. No markdown. No explanation outside JSON.
 
@@ -1518,10 +1550,10 @@ Return format:
           ],
           "workStepsMap": {{
             "Verb Object Qualifier": [
-              "Prepare work requirement",
-              "Inspect work condition",
-              "Perform work activity",
-              "Verify completed work"
+              "Prepare specific materials or tools",
+              "Set up specific work area or component",
+              "Perform specific technical process",
+              "Record specific work outcome"
             ]
           }},
           "notes": "Short rationale explaining the product, service, or outcome represented by this Core Competency."
@@ -1598,36 +1630,56 @@ DACUM task cards:
                     f"Document {subject} Performance",
                 ]
 
-            unit_verbs = [
-                "Prepare",
-                "Perform",
-                "Inspect",
-                "Record",
-            ]
-            unit_objects = [
-                "Work Requirement",
-                "Work Activity",
-                "Work Quality",
-                "Work Result",
+            technical_unit_bank = [
+                [
+                    "Prepare materials",
+                    "Set up work area",
+                    "Perform jointing process",
+                    "Complete work documentation",
+                ],
+                [
+                    "Inspect installation condition",
+                    "Test electrical continuity",
+                    "Assess jointing quality",
+                    "Resolve installation defect",
+                ],
+                [
+                    "Apply safety control",
+                    "Secure cable component",
+                    "Protect joint assembly",
+                    "Maintain worksite compliance",
+                ],
+                [
+                    "Plan technical sequence",
+                    "Coordinate manpower deployment",
+                    "Monitor work progress",
+                    "Report technical performance",
+                ],
             ]
             cleaned_clusters = []
             target_index = find_target_index(level, occupation_title, subarea, 0)
 
-            for cluster_name in cluster_names:
+            for cluster_index, cluster_name in enumerate(cluster_names):
                 cluster_focus = " ".join(cluster_name.split()[1:]).strip() or subject
-                items = [
-                    f"{verb} {cluster_focus} {unit_object}"
-                    for verb, unit_object in zip(unit_verbs, unit_objects)
+                template_units = technical_unit_bank[
+                    cluster_index % len(technical_unit_bank)
                 ]
+                items = [f"{unit} for {cluster_focus}" for unit in template_units]
                 work_steps_map = {}
 
-                for unit_title in items:
+                for item_index, unit_title in enumerate(items):
                     unit_activity = unit_title[0].lower() + unit_title[1:]
+                    technical_focus = [
+                        "site requirement",
+                        "tools and materials",
+                        "technical procedure",
+                        "quality evidence",
+                    ][item_index % 4]
                     work_steps_map[unit_title] = [
-                        f"Review {unit_activity} requirement",
-                        f"Prepare resources for {unit_activity}",
-                        f"Carry out {unit_activity}",
-                        f"Record {unit_activity} outcome",
+                        f"Review {technical_focus} for {unit_activity}",
+                        f"Prepare resources required for {unit_activity}",
+                        f"Carry out {unit_activity} according to work sequence",
+                        f"Record completed outcome for {unit_activity}",
                     ]
 
                 cleaned_clusters.append(
